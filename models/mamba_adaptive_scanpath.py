@@ -149,6 +149,7 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
         self.latent_logvar = nn.Linear(d_model, d_model // 2)
         
         # 从隐变量解码位置
+        # 改进：使用更好的初始化策略，让输出更容易覆盖全范围
         self.position_decoder = nn.Sequential(
             nn.Linear(d_model // 2, d_model // 4),
             nn.LayerNorm(d_model // 4),
@@ -157,6 +158,14 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             nn.Linear(d_model // 4, 2),
             nn.Tanh()
         )
+        
+        # 改进初始化：让位置解码器输出更容易覆盖全范围
+        # 初始化最后一层，让输出更容易分散
+        nn.init.uniform_(self.position_decoder[-2].weight, -0.5, 0.5)
+        nn.init.constant_(self.position_decoder[-2].bias, 0.0)  # 初始化为0，Tanh后为0（转换后为0.5）
+        
+        # 改进：初始化logvar层，让初始方差更大，增加多样性
+        nn.init.constant_(self.latent_logvar.bias, -1.0)  # 初始logvar=-1，对应std≈0.6，增加初始多样性
     
     def reparameterize(self, mu, logvar, temperature=1.0):
         """

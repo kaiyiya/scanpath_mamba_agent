@@ -179,8 +179,12 @@ def visualize_test_results(num_samples=10):
             all_true_scanpaths = np.array(normalized_paths)
 
             # 推理模式预测 - 不使用Teacher Forcing
+            # 改进：增加采样温度以提高多样性，防止路径聚集
+            # 温度>1.0会增加采样方差，让预测路径更分散
+            temperature = 1.5  # 增加温度从1.0到1.5，提高多样性
             # 显式设置enable_early_stop=False，确保返回3个值
-            result = model(image_tensor, gt_scanpaths=None, teacher_forcing_ratio=0.0, enable_early_stop=False)
+            result = model(image_tensor, gt_scanpaths=None, teacher_forcing_ratio=0.0, 
+                          temperature=temperature, enable_early_stop=False)
             # 安全解包：无论返回3个还是5个值，都只取前3个
             pred_scanpath = result[0]
             _ = result[1]  # mus (不需要使用)
