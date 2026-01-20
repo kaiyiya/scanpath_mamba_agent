@@ -19,24 +19,32 @@ import math
 
 def compute_teacher_forcing_ratio(epoch, step_idx=None):
     """
-    指数衰减的Teacher Forcing策略
+    改进的Teacher Forcing策略
 
     Args:
         epoch: 当前训练轮次
         step_idx: 当前序列中的步骤索引（0-29），用于前几步保持高TF
     """
     initial_ratio = 0.7
-    final_ratio = 0.2  # 从0.1提高到0.2
-    decay_epochs = 150  # 从100延长到150
+    final_ratio = 0.3  # 提高最终比例（从0.2到0.3）
+    decay_epochs = 150
 
     # 指数衰减: ratio = 0.7 * exp(-k * epoch)
     k = -math.log(final_ratio / initial_ratio) / decay_epochs
     base_ratio = initial_ratio * math.exp(-k * epoch)
     base_ratio = max(base_ratio, final_ratio)
 
-    # 前5步保持更高的Teacher Forcing，确保序列起始对齐
-    if step_idx is not None and step_idx < 5:
-        return min(base_ratio + 0.3, 0.95)
+    # 前几步平滑衰减（而不是突变）
+    if step_idx is not None:
+        if step_idx < 3:
+            # 前3步：额外+0.2
+            return min(base_ratio + 0.2, 0.95)
+        elif step_idx < 6:
+            # 3-6步：额外+0.1
+            return min(base_ratio + 0.1, 0.90)
+        elif step_idx < 10:
+            # 6-10步：额外+0.05
+            return min(base_ratio + 0.05, 0.85)
 
     return base_ratio
 
@@ -127,24 +135,57 @@ def compute_direction_consistency_loss(pred_scanpaths, true_scanpaths):
 
 def compute_sequence_alignment_loss(pred_scanpaths, true_scanpaths):
     """
-    序列对齐损失：鼓励预测序列与真实序列在时间上对齐
-    前几步给予更高权重，确保起始点和早期轨迹匹配
+    改进的序列对齐损失：只对前5步进行严格对齐
+
+    关键改进：
+    - 只约束前5步，确保起始轨迹对齐（改善LEV）
+    - 后续步骤完全不约束，保持多样性
+    - 避免过度约束导致的"复制"行为
     """
     B, T, D = pred_scanpaths.shape
 
-    # 计算每个预测点与对应真实点的距离
-    point_distances = torch.norm(pred_scanpaths - true_scanpaths, dim=-1)  # (B, T)
+    # 只对前5步进行对齐
+    early_steps = min(5, T)
+    early_pred = pred_scanpaths[:, :early_steps, :]
+    early_true = true_scanpaths[:, :early_steps, :]
 
-    # 前几步给予更高权重（对LEV指标至关重要）
-    weights = torch.ones(T, device=pred_scanpaths.device)
-    weights[:5] = 5.0   # 前5步权重x5（起始点对齐）
-    weights[5:10] = 3.0  # 5-10步权重x3
-    weights[10:15] = 2.0  # 10-15步权重x2
+    # 计算前5步的点对点距离
+    early_distances = torch.norm(early_pred - early_true, dim=-1)  # (B, 5)
 
-    # 加权平均
-    alignment_loss = torch.mean(point_distances * weights.unsqueeze(0))
+    # 前5步递减权重：5.0, 4.0, 3.0, 2.0, 1.5
+    early_weights = torch.tensor([5.0, 4.0, 3.0, 2.0, 1.5], device=pred_scanpaths.device)[:early_steps]
+
+    # 只计算前5步的加权平均
+    alignment_loss = torch.mean(early_distances * early_weights.unsqueeze(0))
 
     return alignment_loss
+
+
+def compute_batch_diversity_loss(pred_scanpaths):
+    """
+    Batch多样性损失：鼓励不同样本生成不同的路径
+
+    通过最大化batch内样本之间的距离来增加多样性
+    """
+    B, T, D = pred_scanpaths.shape
+
+    # 展平为 (B, T*D)
+    pred_flat = pred_scanpaths.reshape(B, -1)
+
+    # 计算两两之间的欧氏距离
+    distances = torch.cdist(pred_flat, pred_flat, p=2)  # (B, B)
+
+    # 只取上三角（避免重复计算和对角线）
+    mask = torch.triu(torch.ones(B, B, device=pred_scanpaths.device), diagonal=1)
+    distances = distances * mask
+
+    # 平均距离（越大越好，说明样本之间差异大）
+    avg_distance = distances.sum() / (mask.sum() + 1e-8)
+
+    # 损失：负的平均距离（最小化负距离 = 最大化距离）
+    diversity_loss = -avg_distance
+
+    return diversity_loss
 
 
 def train():
@@ -252,10 +293,13 @@ def train():
             # 5. 方向一致性损失（合并direction + direction_continuity）
             direction_consistency_loss = compute_direction_consistency_loss(predicted_scanpaths, true_scanpaths)
 
-            # 6. 序列对齐损失（新增：改善LEV指标）
+            # 6. 序列对齐损失（新增：只约束前5步，改善LEV）
             sequence_alignment_loss = compute_sequence_alignment_loss(predicted_scanpaths, true_scanpaths)
 
-            # 7. 边界约束
+            # 7. Batch多样性损失（新增：鼓励样本间差异）
+            batch_diversity_loss = compute_batch_diversity_loss(predicted_scanpaths)
+
+            # 8. 边界约束
             boundary_min = 0.02
             boundary_max = 0.98
             below_boundary = (predicted_scanpaths < boundary_min).float()
@@ -265,36 +309,39 @@ def train():
                 above_boundary * (predicted_scanpaths - boundary_max) ** 2
             )
 
-            # ========== 改进的权重调度 ==========
+            # ========== 改进的权重调度（恢复多样性）==========
             if epoch <= 80:
                 weights = {
-                    'reconstruction': 2.0,  # 提高（从1.0到2.0）
-                    'kl': 0.001,            # 降低（从0.005到0.001）
+                    'reconstruction': 1.0,      # 降低（从2.0到1.0）
+                    'kl': 0.005,                # 提高（从0.001到0.005）
                     'spatial_coverage': 0.5,
-                    'trajectory_smoothness': 1.5,
-                    'direction_consistency': 0.5,
-                    'sequence_alignment': 2.0,  # 新增：高权重改善LEV
+                    'trajectory_smoothness': 1.0,   # 降低（从1.5到1.0）
+                    'direction_consistency': 0.3,   # 降低（从0.5到0.3）
+                    'sequence_alignment': 5.0,      # 只约束前5步
+                    'batch_diversity': 0.1,         # 新增：鼓励多样性
                     'boundary': 0.2
                 }
             elif epoch <= 150:
                 progress = (epoch - 80) / 70.0
                 weights = {
-                    'reconstruction': 2.0,
-                    'kl': 0.001,
+                    'reconstruction': 1.0,
+                    'kl': 0.005 + 0.005*progress,   # 逐渐增加到0.01
                     'spatial_coverage': 0.5 + 0.3*progress,
-                    'trajectory_smoothness': 1.5,
-                    'direction_consistency': 0.5,
-                    'sequence_alignment': 2.0 + 1.0*progress,  # 逐渐增加到3.0
+                    'trajectory_smoothness': 1.0,
+                    'direction_consistency': 0.3,
+                    'sequence_alignment': 5.0,
+                    'batch_diversity': 0.1 + 0.1*progress,  # 逐渐增加到0.2
                     'boundary': 0.2
                 }
             else:
                 weights = {
-                    'reconstruction': 2.0,
-                    'kl': 0.001,
+                    'reconstruction': 1.0,
+                    'kl': 0.01,                 # 最终值0.01（保持多样性）
                     'spatial_coverage': 0.8,
-                    'trajectory_smoothness': 1.5,
-                    'direction_consistency': 0.5,
-                    'sequence_alignment': 3.0,  # 最终高权重
+                    'trajectory_smoothness': 1.0,
+                    'direction_consistency': 0.3,
+                    'sequence_alignment': 5.0,
+                    'batch_diversity': 0.2,     # 最终值0.2
                     'boundary': 0.2
                 }
 
@@ -306,6 +353,7 @@ def train():
                 weights['trajectory_smoothness'] * trajectory_smoothness_loss +
                 weights['direction_consistency'] * direction_consistency_loss +
                 weights['sequence_alignment'] * sequence_alignment_loss +
+                weights['batch_diversity'] * batch_diversity_loss +
                 weights['boundary'] * boundary_penalty
             )
 
@@ -346,7 +394,8 @@ def train():
                     'PosErr': f"{avg_error:.4f}",
                     'TF': f"{teacher_forcing_ratio:.3f}",
                     'SeqAlign': f"{sequence_alignment_loss.item():.4f}",
-                    'SpatCov': f"{spatial_coverage_loss.item():.4f}",
+                    'BatchDiv': f"{batch_diversity_loss.item():.4f}",
+                    'KL': f"{kl_loss.item():.5f}",
                 })
 
         # 平均训练指标
@@ -404,7 +453,10 @@ def train():
                     # 6. 序列对齐损失
                     sequence_alignment_loss = compute_sequence_alignment_loss(predicted_scanpaths, true_scanpaths)
 
-                    # 7. 边界约束
+                    # 7. Batch多样性损失
+                    batch_diversity_loss = compute_batch_diversity_loss(predicted_scanpaths)
+
+                    # 8. 边界约束
                     boundary_min = 0.02
                     boundary_max = 0.98
                     below_boundary = (predicted_scanpaths < boundary_min).float()
@@ -417,33 +469,36 @@ def train():
                     # 使用与训练相同的权重
                     if epoch <= 80:
                         weights = {
-                            'reconstruction': 2.0,
-                            'kl': 0.001,
+                            'reconstruction': 1.0,
+                            'kl': 0.005,
                             'spatial_coverage': 0.5,
-                            'trajectory_smoothness': 1.5,
-                            'direction_consistency': 0.5,
-                            'sequence_alignment': 2.0,
+                            'trajectory_smoothness': 1.0,
+                            'direction_consistency': 0.3,
+                            'sequence_alignment': 5.0,
+                            'batch_diversity': 0.1,
                             'boundary': 0.2
                         }
                     elif epoch <= 150:
                         progress = (epoch - 80) / 70.0
                         weights = {
-                            'reconstruction': 2.0,
-                            'kl': 0.001,
+                            'reconstruction': 1.0,
+                            'kl': 0.005 + 0.005*progress,
                             'spatial_coverage': 0.5 + 0.3*progress,
-                            'trajectory_smoothness': 1.5,
-                            'direction_consistency': 0.5,
-                            'sequence_alignment': 2.0 + 1.0*progress,
+                            'trajectory_smoothness': 1.0,
+                            'direction_consistency': 0.3,
+                            'sequence_alignment': 5.0,
+                            'batch_diversity': 0.1 + 0.1*progress,
                             'boundary': 0.2
                         }
                     else:
                         weights = {
-                            'reconstruction': 2.0,
-                            'kl': 0.001,
+                            'reconstruction': 1.0,
+                            'kl': 0.01,
                             'spatial_coverage': 0.8,
-                            'trajectory_smoothness': 1.5,
-                            'direction_consistency': 0.5,
-                            'sequence_alignment': 3.0,
+                            'trajectory_smoothness': 1.0,
+                            'direction_consistency': 0.3,
+                            'sequence_alignment': 5.0,
+                            'batch_diversity': 0.2,
                             'boundary': 0.2
                         }
 
@@ -455,6 +510,7 @@ def train():
                         weights['trajectory_smoothness'] * trajectory_smoothness_loss +
                         weights['direction_consistency'] * direction_consistency_loss +
                         weights['sequence_alignment'] * sequence_alignment_loss +
+                        weights['batch_diversity'] * batch_diversity_loss +
                         weights['boundary'] * boundary_penalty
                     )
 
