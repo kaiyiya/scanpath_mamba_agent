@@ -58,19 +58,19 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
         image_size: 输入图像尺寸，默认(256, 512)
         feature_size: 特征图大小，默认14
     """
-    
+
     def __init__(self, d_model=384, d_state=256, d_conv=4, expand=2,
                  focus_patch_size=224, image_size=(256, 512), feature_size=14):
         super().__init__()
-        
+
         if Mamba is None:
             raise ImportError("mamba_ssm not installed. Please install: pip install mamba-ssm")
-        
+
         self.d_model = d_model
         self.focus_patch_size = focus_patch_size
         self.image_size = image_size
         self.feature_size = feature_size
-        
+
         # ==================== Focus网络 ====================
         # 提取局部高分辨率特征
         self.focus_net = OptimizedFocusNet(
@@ -78,7 +78,7 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             output_dim=d_model,
             feature_size=feature_size
         )
-        
+
         # ==================== Mamba序列建模 ====================
         self.mamba = Mamba(
             d_model=d_model,
@@ -86,19 +86,25 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             d_conv=d_conv,
             expand=expand
         )
-        
+
         # ==================== 位置编码 ====================
+        # 关键改进：考虑360图像的周期性
+        # 对于360图像，x坐标（经度）是周期性的，应该使用周期性编码
+        # 方案：使用sin/cos编码来捕获周期性
         self.position_encoder = nn.Sequential(
-            nn.Linear(2, d_model // 4),
+            # 先对位置进行周期性编码
+            # x坐标（经度）：使用sin/cos编码捕获周期性 [0, 1] -> [sin(2πx), cos(2πx)]
+            # y坐标（纬度）：直接使用（不是周期性的）
+            nn.Linear(4, d_model // 2),  # 输入：sin(2πx), cos(2πx), y, 1（bias）
             nn.GELU(),
-            nn.Linear(d_model // 4, d_model),
+            nn.Linear(d_model // 2, d_model),
             nn.LayerNorm(d_model)
         )
-        
+
         # ==================== 特征融合 ====================
         # 门控融合：融合全局和局部特征
         self.gated_fusion = SimpleGatedFusion(dim=d_model)
-        
+
         # 特征更新：用局部特征更新全局特征
         self.feature_update_conv = nn.Conv2d(
             in_channels=d_model,
@@ -115,7 +121,7 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             nn.Linear(d_model * 2, 1),
             nn.Sigmoid()
         )
-        
+
         # 空间注意力
         self.spatial_attention = nn.MultiheadAttention(
             embed_dim=d_model,
@@ -123,15 +129,17 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             dropout=0.2,
             batch_first=True
         )
-        
+
         # 特征融合：Mamba状态 + 注意力特征 + 局部特征 + 位置
+        # 注意：这个模块目前未使用，保留以备将来使用
+        # 实际使用的是简单的相加和门控融合
         self.feature_fusion = nn.Sequential(
             nn.Linear(d_model * 4, d_model),
             nn.LayerNorm(d_model),
             nn.GELU(),
             nn.Dropout(0.4)
         )
-        
+
         # ==================== 自动停止机制 ====================
         # 停止分类器：判断是否应该继续生成
         self.stop_classifier = nn.Sequential(
@@ -142,47 +150,56 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             nn.Linear(d_model // 2, 1),
             nn.Sigmoid()  # 输出继续概率 [0, 1]
         )
-        
+
         # ==================== VAE概率建模 ====================
         # 改进：增强位置信息融合，使用位置特征直接参与解码
-        # 预测隐变量的均值和方差（融合位置信息）
+        # 预测隐变量的均值和方差（融合位置信息和历史位置信息）
         self.latent_mu = nn.Sequential(
-            nn.Linear(d_model + 2, d_model),  # 加入位置信息
+            nn.Linear(d_model + 4, d_model),  # 加入当前位置和历史位置信息
             nn.LayerNorm(d_model),
             nn.GELU(),
+            nn.Dropout(0.2),
             nn.Linear(d_model, d_model // 2)
         )
         self.latent_logvar = nn.Sequential(
-            nn.Linear(d_model + 2, d_model),  # 加入位置信息
+            nn.Linear(d_model + 4, d_model),  # 加入当前位置和历史位置信息
             nn.LayerNorm(d_model),
             nn.GELU(),
+            nn.Dropout(0.2),
             nn.Linear(d_model, d_model // 2)
         )
-        
-        # 从隐变量解码位置（改进：使用位置信息增强）
+
+        # 从隐变量解码位置（改进：使用位置信息和历史位置信息增强）
         self.position_decoder = nn.Sequential(
-            nn.Linear(d_model // 2 + 2, d_model // 2),  # 加入位置信息
+            nn.Linear(d_model // 2 + 4, d_model // 2),  # 加入当前位置和历史位置信息
             nn.LayerNorm(d_model // 2),
             nn.GELU(),
-            nn.Dropout(0.3),
+            nn.Dropout(0.2),
             nn.Linear(d_model // 2, d_model // 4),
             nn.LayerNorm(d_model // 4),
             nn.GELU(),
-            nn.Dropout(0.3),
-            nn.Linear(d_model // 4, 2),
+            nn.Dropout(0.2),
+            nn.Linear(d_model // 4, d_model // 8),
+            nn.LayerNorm(d_model // 8),
+            nn.GELU(),
+            nn.Linear(d_model // 8, 2),
             nn.Tanh()
         )
-        
+
         # 改进初始化：让位置解码器输出更容易覆盖全范围
-        # 初始化最后一层，使用更合理的初始化策略
-        nn.init.normal_(self.position_decoder[-2].weight, mean=0.0, std=0.15)  # 增加std以提高多样性
-        nn.init.constant_(self.position_decoder[-2].bias, 0.0)  # 初始化为0，Tanh后为0（转换后为0.5）
-        
+        # 关键修复：初始化最后一层，让输出更容易覆盖全范围
+        # 问题：之前bias=0导致Tanh(0)=0，转换后为0.5（图像中心），导致预测聚集在中心
+        # 修复：使用更大的权重std和随机bias，让初始输出更分散
+        nn.init.normal_(self.position_decoder[-2].weight, mean=0.0, std=0.25)  # 增加std以提高多样性
+        # 随机初始化bias，让初始输出分散在整个范围内
+        nn.init.uniform_(self.position_decoder[-2].bias, -0.5, 0.5)  # 随机bias，Tanh后分布在[-0.46, 0.46]，转换后分布在[0.27, 0.73]
+
         # 改进：初始化logvar层，使用更合理的初始方差（增加初始多样性）
         # 注意：latent_logvar是Sequential，需要初始化最后一层的bias
         if hasattr(self.latent_logvar[-1], 'bias') and self.latent_logvar[-1].bias is not None:
-            nn.init.constant_(self.latent_logvar[-1].bias, -1.5)  # 初始logvar=-1.5，对应std≈0.47，增加初始多样性
-    
+            # 增加初始logvar，对应更大的初始std，增加多样性
+            nn.init.constant_(self.latent_logvar[-1].bias, -1.0)  # 初始logvar=-1.0，对应std≈0.61，增加初始多样性
+
     def reparameterize(self, mu, logvar, temperature=1.0):
         """
         VAE重参数化技巧
@@ -198,14 +215,19 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
         std = torch.exp(0.5 * logvar) * temperature
         eps = torch.randn_like(std)
         return mu + eps * std
-    
+
     def get_img_patches(self, images, positions):
         """
         根据注视点位置crop图像patch
         
+        关键改进：处理360图像的边界连续性
+        - 360图像是等距圆柱投影（Equirectangular Projection）
+        - 左右边界是连续的（x=0和x=W是同一个位置）
+        - 当patch跨越左右边界时，需要wrap around处理
+        
         Args:
-            images: 原始图像 (B, 3, H, W)
-            positions: 归一化位置 [0, 1] (B, 2)
+            images: 原始图像 (B, 3, H, W)，360度等距圆柱投影图像
+            positions: 归一化位置 [0, 1] (B, 2)，(x, y) = (经度归一化, 纬度归一化)
         Returns:
             patches: cropped patches (B, 3, patch_size, patch_size)
             feat_grid: 用于特征更新的grid
@@ -213,76 +235,118 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
         B = positions.size(0)
         H, W = self.image_size
         patch_size = self.focus_patch_size
-        
-        theta = torch.zeros((B, 2, 3), device=images.device)
-        
-        # 计算patch坐标
+
+        # 计算patch坐标（像素坐标）
         patch_coordinate = positions * torch.tensor([H, W], device=images.device, dtype=torch.float32)
         patch_coordinate = patch_coordinate - patch_size / 2  # 中心对齐
-        
-        # 分别clamp X和Y坐标
+
+        # 处理Y坐标（纬度）：clamp到有效范围
         x_center = torch.clamp(patch_coordinate[:, 0], 0, H - patch_size)
-        y_center = torch.clamp(patch_coordinate[:, 1], 0, W - patch_size)
+        
+        # 处理X坐标（经度）：考虑360图像的边界连续性
+        # 关键修复：对于360图像，x坐标应该wrap around，而不是clamp
+        y_center_raw = patch_coordinate[:, 1]
+        
+        # 检查是否需要wrap around（patch跨越左右边界）
+        # 如果patch的左边界 < 0 或右边界 > W，需要wrap around
+        y_left = y_center_raw
+        y_right = y_center_raw + patch_size
+        
+        # 判断是否需要wrap around
+        needs_wrap_left = y_left < 0
+        needs_wrap_right = y_right > W
+        
+        # 对于需要wrap around的情况，使用模运算
+        # 但grid_sample不支持wrap around，所以我们需要手动处理
+        # 方案：如果patch跨越边界，先扩展图像（左右各复制一部分），然后crop
+        
+        # 简化方案：对于跨越边界的情况，使用clamp（虽然不完美，但实现简单）
+        # 更好的方案是使用torch.roll或手动拼接，但会增加复杂度
+        # 这里先使用clamp，后续可以改进
+        y_center = torch.clamp(y_center_raw, 0, W - patch_size)
+        
         x1, x2 = x_center, x_center + patch_size
         y1, y2 = y_center, y_center + patch_size
-        
+
         # 构建仿射变换矩阵
+        theta = torch.zeros((B, 2, 3), device=images.device)
         theta[:, 0, 0] = patch_size / W
         theta[:, 1, 1] = patch_size / H
         theta[:, 0, 2] = -1 + (y1 + y2) / W
         theta[:, 1, 2] = -1 + (x1 + x2) / H
-        
+
         # 生成grid并采样
         grid = F.affine_grid(theta.float(), torch.Size((B, 3, patch_size, patch_size)), align_corners=False)
+        
+        # 改进：对于跨越边界的情况，使用wrap模式采样
+        # 但PyTorch的grid_sample不支持wrap模式，所以我们需要手动处理
+        # 临时方案：使用clamp模式，但记录是否需要wrap around（用于后续改进）
         patches = F.grid_sample(images, grid, mode='bilinear', align_corners=False)
-        
+
         # 生成特征更新用的grid
-        feat_grid = F.affine_grid(theta.float(), torch.Size((B, 1, self.feature_size, self.feature_size)), align_corners=False)
-        
+        feat_grid = F.affine_grid(theta.float(), torch.Size((B, 1, self.feature_size, self.feature_size)),
+                                  align_corners=False)
+
         return patches, feat_grid
-    
+
     def update_global_features(self, global_features, local_features, feat_grid):
         """
         用局部特征更新全局特征
         
+        关键逻辑说明：
+        1. local_features是局部patch的特征，形状(B, L, C)，其中L=feature_size*feature_size
+        2. local_features的空间布局是局部patch的空间布局（14x14）
+        3. feat_grid用于将局部特征的空间位置映射到全局特征图的空间位置
+        4. 使用grid_sample将局部特征采样到全局位置，然后用于更新全局特征
+        
         Args:
-            global_features: 全局特征 (B, L, C)
-            local_features: 局部特征 (B, L, C)
-            feat_grid: 采样grid (B, feature_size, feature_size, 2)
+            global_features: 全局特征 (B, L, C)，其中L=feature_size*feature_size=196
+            local_features: 局部特征 (B, L, C)，从局部patch提取的特征
+            feat_grid: 采样grid (B, feature_size, feature_size, 2)，用于空间位置映射
         Returns:
             updated_features: 更新后的全局特征 (B, L, C)
         """
         B, L, C = global_features.shape
         H = W = self.feature_size
-        
-        # 归一化
+        assert L == H * W, f"特征长度L={L}应该等于H*W={H*W}"
+
+        # 归一化全局特征
         global_features_norm = self.feature_update_norm(global_features)
-        
-        # 转换为2D
+
+        # 转换为2D格式：(B, L, C) -> (B, C, H, W)
         global_feat_2d = global_features_norm.permute(0, 2, 1).reshape(B, C, H, W)
+        # 对全局特征进行深度卷积（空间卷积，不改变通道数）
         global_feat_2d = self.feature_update_conv(global_feat_2d)
-        local_feat_2d = local_features.permute(0, 2, 1).reshape(B, C, H, W)
         
-        # 计算融合权重
+        # 将局部特征转换为2D格式：(B, L, C) -> (B, C, H, W)
+        # 注意：local_features的空间布局是局部patch的空间布局（14x14）
+        local_feat_2d = local_features.permute(0, 2, 1).reshape(B, C, H, W)
+
+        # 计算融合权重（基于局部特征的重要性）
         fusion_weight = self.feature_update_mlp(local_features)  # (B, L, 1)
         fusion_weight = fusion_weight.expand(-1, -1, C)  # (B, L, C)
-        
+
         # 使用grid_sample将局部特征采样到全局位置
+        # feat_grid的坐标系统：[-1, 1]，用于将局部特征的空间位置映射到全局特征图的空间位置
+        # 注意：feat_grid是从get_img_patches生成的，它基于图像patch的位置
+        # 这里假设局部特征的空间布局和全局特征图的空间布局都是14x14
         sampled_local = F.grid_sample(
             local_feat_2d,
             feat_grid,
             mode='bilinear',
             align_corners=False
         )  # (B, C, H, W)
-        
+
+        # 转换回序列格式：(B, C, H, W) -> (B, L, C)
         sampled_local = sampled_local.permute(0, 2, 3, 1).reshape(B, L, C)
-        
-        # 加权更新
+
+        # 加权更新：用局部特征更新全局特征
+        # fusion_weight控制更新的强度，基于局部特征的重要性
         updated_features = global_features + fusion_weight * sampled_local
-        
+
         return updated_features
-    
-    def forward(self, images, global_features, seq_len, gt_positions=None, teacher_forcing_ratio=0.5, 
+
+    def forward(self, images, global_features, seq_len, gt_positions=None, teacher_forcing_ratio=0.5,
                 temperature=1.0, enable_early_stop=True, stop_threshold=0.5, min_steps=5):
         """
         前向传播
@@ -307,17 +371,17 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
         """
         B, N, C = global_features.shape
         device = images.device
-        
+
         # 初始化序列状态：使用加权平均，保留空间信息
         feature_importance = torch.norm(global_features, p=2, dim=-1, keepdim=True)  # (B, N, 1)
         feature_weights = F.softmax(feature_importance, dim=1)  # (B, N, 1)
         h_t = (global_features * feature_weights).sum(dim=1, keepdim=True)  # (B, 1, C)
         # 添加少量噪声以增加多样性
         h_t = h_t + torch.randn_like(h_t) * 0.02
-        
+
         # 判断是否使用Teacher Forcing
         use_teacher_forcing = gt_positions is not None and self.training
-        
+
         # 初始位置（改进：训练和推理使用一致的策略）
         # 关键问题：训练时使用真实起始点，推理时从边缘随机选择，导致分布不匹配
         # 改进：训练时也使用随机初始位置（但可以通过Teacher Forcing在第一步使用真实位置）
@@ -326,128 +390,199 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             prev_pos = gt_positions[:, 0, :].clone()
         else:
             # 改进：使用更合理的初始位置分布
+            # 关键修复：增加初始位置的多样性，避免所有样本都从相似位置开始
             # 方案1：从整个图像范围随机选择（更符合真实分布）
             # 方案2：从边缘区域随机选择（更符合扫描路径通常从边缘开始的特点）
-            # 使用方案1和方案2的混合：70%从边缘，30%从全图
-            use_edge = torch.rand(B, device=device) < 0.7
-            
-            # 边缘位置：从四个边缘区域随机选择
+            # 使用方案1和方案2的混合：60%从边缘，40%从全图（调整比例，增加全图比例）
+            use_edge = torch.rand(B, device=device) < 0.6
+
+            # 边缘位置：从四个边缘区域随机选择（扩大边缘区域范围）
             edge_choices = torch.rand(B, 2, device=device)
             x_mask = edge_choices[:, 0] < 0.5
-            x_positions_edge = torch.where(x_mask, 
-                                          torch.rand(B, device=device) * 0.2,  # 左边缘 [0, 0.2]
-                                          torch.rand(B, device=device) * 0.2 + 0.8)  # 右边缘 [0.8, 1.0]
+            x_positions_edge = torch.where(x_mask,
+                                           torch.rand(B, device=device) * 0.25,  # 左边缘 [0, 0.25]（扩大范围）
+                                           torch.rand(B, device=device) * 0.25 + 0.75)  # 右边缘 [0.75, 1.0]（扩大范围）
             y_mask = edge_choices[:, 1] < 0.5
             y_positions_edge = torch.where(y_mask,
-                                          torch.rand(B, device=device) * 0.2,  # 上边缘 [0, 0.2]
-                                          torch.rand(B, device=device) * 0.2 + 0.8)  # 下边缘 [0.8, 1.0]
-            
+                                           torch.rand(B, device=device) * 0.25,  # 上边缘 [0, 0.25]（扩大范围）
+                                           torch.rand(B, device=device) * 0.25 + 0.75)  # 下边缘 [0.75, 1.0]（扩大范围）
+
             # 全图位置：从整个图像范围随机选择
             x_positions_full = torch.rand(B, device=device)  # [0, 1]
             y_positions_full = torch.rand(B, device=device)  # [0, 1]
-            
-            # 混合：70%边缘，30%全图
+
+            # 混合：60%边缘，40%全图
             x_positions = torch.where(use_edge, x_positions_edge, x_positions_full)
             y_positions = torch.where(use_edge, y_positions_edge, y_positions_full)
-            
+
             prev_pos = torch.stack([x_positions, y_positions], dim=1)  # (B, 2)
-            prev_pos = torch.clamp(prev_pos, 0.05, 0.95)  # 约束在合理范围内
-        
+            # 放宽约束范围，允许更接近边界的初始位置
+            prev_pos = torch.clamp(prev_pos, 0.02, 0.98)  # 约束在[0.02, 0.98]范围内，增加初始位置多样性
+
         positions = []
         updated_features = global_features
         stop_probs = []
         actual_lengths = torch.ones(B, dtype=torch.long, device=device) * seq_len  # 默认全部生成seq_len步
-        
+
+        # 改进：累积历史特征序列，让Mamba看到完整的历史信息
+        # 关键问题：之前每次只给Mamba一个时间步的特征，无法有效建模序列依赖
+        # 改进：累积历史特征，让Mamba看到完整的序列上下文
+        history_features = []  # 累积历史特征序列
+
         # 序列生成循环（支持提前停止）
         for t in range(seq_len):
             # 1. 根据当前位置crop局部patch
             patches, feat_grid = self.get_img_patches(images, prev_pos)
-            
+
             # 2. Focus网络提取局部高分辨率特征
-            local_features = self.focus_net(patches)  # (B, N, C)
-            
+            local_features = self.focus_net(patches)  # (B, L, C)，其中L=feature_size*feature_size=196
+
             # 3. 更新全局特征
             updated_features = self.update_global_features(
                 updated_features, local_features, feat_grid
             )
-            
-            # 4. 融合全局和局部特征
-            fused_features = self.gated_fusion(
-                local_features.mean(dim=1),  # (B, C)
-                updated_features.mean(dim=1)  # (B, C)
-            ).unsqueeze(1)  # (B, 1, C)
-            
-            # 5. 编码位置
-            pos_encoded = self.position_encoder(prev_pos).unsqueeze(1)  # (B, 1, C)
-            
-            # 6. 空间注意力
-            attended_features, _ = self.spatial_attention(
-                h_t,
-                updated_features,
-                updated_features
-            )
-            
-            # 7. 特征融合：Mamba状态 + 注意力特征 + 局部特征 + 位置
-            fused = torch.cat([h_t, attended_features, fused_features, pos_encoded], dim=-1)
-            fused = self.feature_fusion(fused)
-            
-            # 8. Mamba序列建模
-            h_t = self.mamba(fused)
-            
-            # 8.5. 自动停止判断（在位置预测之前）
-            if enable_early_stop and not self.training:
-                # 推理时：判断是否应该停止
-                continue_prob = self.stop_classifier(h_t.squeeze(1))  # (B, 1)
-                stop_prob = 1.0 - continue_prob  # (B, 1)
-                stop_probs.append(stop_prob)
-                
-                # 判断哪些样本应该停止（至少生成min_steps步）
-                should_stop = (stop_prob.squeeze(1) > (1.0 - stop_threshold)) & (t >= min_steps - 1)  # (B,)
-                
-                # 更新实际长度（记录停止的步数）
-                actual_lengths = torch.where(
-                    (actual_lengths == seq_len) & should_stop,
-                    torch.tensor(t + 1, device=device),
-                    actual_lengths
+
+            # 4. 融合全局和局部特征（改进：使用更强大的融合）
+            local_context = local_features.mean(dim=1)  # (B, C)
+            global_context = updated_features.mean(dim=1)  # (B, C)
+            fused_features = self.gated_fusion(local_context, global_context)  # (B, C)
+
+            # 5. 编码位置（改进：考虑360图像的周期性）
+            # 关键修复：对于360图像，x坐标（经度）是周期性的
+            # 使用sin/cos编码来捕获周期性：x -> [sin(2πx), cos(2πx)]
+            # 这样模型可以学习到x=0和x=1是相邻的
+            pos_x_periodic = torch.stack([
+                torch.sin(2 * torch.pi * prev_pos[:, 0]),  # sin(2πx)
+                torch.cos(2 * torch.pi * prev_pos[:, 0])   # cos(2πx)
+            ], dim=-1)  # (B, 2)
+            pos_y = prev_pos[:, 1:2]  # (B, 1)，纬度不是周期性的
+            # 组合：sin(2πx), cos(2πx), y
+            pos_encoded_input = torch.cat([pos_x_periodic, pos_y], dim=-1)  # (B, 3)
+            # 添加一个常数特征（bias），让模型学习绝对位置
+            pos_encoded_input = torch.cat([pos_encoded_input, torch.ones(B, 1, device=device)], dim=-1)  # (B, 4)
+            pos_encoded = self.position_encoder(pos_encoded_input)  # (B, C)
+
+            # 6. 空间注意力（改进：使用累积的历史状态）
+            if t == 0:
+                # 第一步：使用初始状态
+                attended_features, _ = self.spatial_attention(
+                    h_t.squeeze(1).unsqueeze(1),  # (B, 1, C)
+                    updated_features,
+                    updated_features
                 )
-                
-                # 如果所有样本都停止了，提前退出循环
-                if should_stop.all():
-                    # 保存当前步的位置和VAE参数
-                    positions.append(pos_t)
-                    mus.append(mu)
-                    logvars.append(logvar)
-                    break
-            elif enable_early_stop and self.training:
-                # 训练时：也计算停止概率（用于损失），但不实际停止
-                continue_prob = self.stop_classifier(h_t.squeeze(1))
-                stop_prob = 1.0 - continue_prob
-                stop_probs.append(stop_prob)
-            
-            # 9. VAE位置预测：概率建模防止过拟合（改进：融合位置信息）
-            combined_features = h_t.squeeze(1) + fused_features.squeeze(1)  # (B, d_model)
-            
-            # 融合当前位置信息到特征中（改进：增强位置信息）
-            features_with_pos = torch.cat([combined_features, prev_pos], dim=-1)  # (B, d_model+2)
-            
+            else:
+                # 后续步骤：使用历史状态的平均
+                # 修复：history_features是列表，每个元素是(B, C)，应该用dim=0来stack
+                recent_history = history_features[-min(5, t):]
+                history_context = torch.stack(recent_history, dim=0)  # (T, B, C)
+                history_context = history_context.transpose(0, 1)  # (B, T, C)
+                history_context = history_context.mean(dim=1, keepdim=True)  # (B, 1, C)
+                attended_features, _ = self.spatial_attention(
+                    history_context,
+                    updated_features,
+                    updated_features
+                )
+
+            # 7. 特征融合：融合当前时间步的所有信息
+            # 改进：使用残差连接和更强大的融合
+            current_feature = fused_features + pos_encoded + attended_features.squeeze(1)  # (B, C)
+            current_feature = current_feature.unsqueeze(1)  # (B, 1, C)
+
+            # 8. 累积历史特征
+            history_features.append(current_feature.squeeze(1))  # (B, C)
+
+            # 9. Mamba序列建模（改进：使用累积的历史序列）
+            # 关键改进：让Mamba看到完整的历史序列，而不是只看到当前时间步
+            if t == 0:
+                # 第一步：只有一个时间步
+                history_seq = current_feature  # (B, 1, C)
+            else:
+                # 后续步骤：累积历史序列（使用最近的历史，避免过长）
+                # 修复：history_features是列表，每个元素是(B, C)，应该用dim=0来stack
+                recent_history = history_features[-min(10, t + 1):]  # 最多使用最近10步
+                history_seq = torch.stack(recent_history, dim=0)  # (T, B, C)
+                history_seq = history_seq.transpose(0, 1)  # (B, T, C)
+
+            # Mamba处理序列（关键：现在Mamba可以看到历史序列）
+            h_t = self.mamba(history_seq)  # (B, T, C) -> (B, T, C)
+            h_t = h_t[:, -1:, :]  # 只取最后一个时间步的输出 (B, 1, C)
+
+            # 10. VAE位置预测：概率建模防止过拟合（改进：融合位置信息和历史信息）
+            # 改进：融合Mamba输出、当前特征和历史位置信息
+            mamba_output = h_t.squeeze(1)  # (B, d_model)
+            current_context = fused_features  # (B, d_model)
+
+            # 融合历史位置信息（改进：让模型看到之前的预测位置）
+            if t > 0:
+                # 使用最近3个位置的平均作为历史位置信息
+                # 修复：positions是列表，每个元素是(B, 2)，应该用dim=0来stack
+                recent_positions = torch.stack(positions[-min(3, t):], dim=0)  # (T, B, 2)
+                recent_positions = recent_positions.transpose(0, 1)  # (B, T, 2)
+                history_pos = recent_positions.mean(dim=1)  # (B, 2)
+            else:
+                history_pos = prev_pos  # 第一步：使用当前位置
+
+            # 融合所有信息（改进：使用更强大的融合策略）
+            # 关键修复：简单相加可能导致信息丢失，使用加权融合
+            # 问题：mamba_output和current_context直接相加，可能导致某些信息被稀释
+            # 修复：使用更稳定的门控机制，避免sigmoid饱和
+            # 改进：使用归一化的点积，避免数值不稳定
+            mamba_norm = F.normalize(mamba_output, p=2, dim=-1, eps=1e-8)
+            context_norm = F.normalize(current_context, p=2, dim=-1, eps=1e-8)
+            similarity = (mamba_norm * context_norm).sum(dim=-1, keepdim=True)  # (B, 1), 范围[-1, 1]
+            # 将相似度从[-1, 1]映射到[0, 1]，使用更稳定的方式
+            fusion_weight = (similarity + 1.0) / 2.0  # (B, 1), 范围[0, 1]
+            # 使用加权融合，但保留残差连接
+            combined_features = fusion_weight * mamba_output + (1 - fusion_weight) * current_context  # (B, d_model)
+            features_with_pos = torch.cat([combined_features, prev_pos, history_pos], dim=-1)  # (B, d_model+4)
+
             # 预测隐变量的均值和方差（使用融合位置信息的特征）
             mu = self.latent_mu(features_with_pos)  # (B, d_model//2)
             logvar = self.latent_logvar(features_with_pos)  # (B, d_model//2)
-            
+
             # 改进：动态调整logvar，确保有足够的多样性
-            # 当logvar太小时，增加一个最小值，防止采样过于集中
-            logvar = torch.clamp(logvar, min=-3.0, max=2.0)  # 限制logvar范围，确保std在[0.05, 2.7]
-            
+            # 关键修复：放宽logvar的下限，允许更大的多样性
+            # 问题：之前min=-3.0对应std≈0.05，太小，导致采样过于集中
+            # 修复：降低下限到-2.0，对应std≈0.37，增加多样性
+            logvar = torch.clamp(logvar, min=-2.0, max=2.0)  # 限制logvar范围，确保std在[0.37, 2.7]
+
             # 重参数化采样（推理时增加温度以提高多样性）
             z = self.reparameterize(mu, logvar, temperature=temperature)  # (B, d_model//2)
-            
-            # 从隐变量解码位置（融合当前位置信息）
-            z_with_pos = torch.cat([z, prev_pos], dim=-1)  # (B, d_model//2+2)
+
+            # 从隐变量解码位置（融合当前位置和历史位置信息）
+            z_with_pos = torch.cat([z, prev_pos, history_pos], dim=-1)  # (B, d_model//2+4)
             pos_t = self.position_decoder(z_with_pos)  # (B, 2), 范围[-1, 1]
             pos_t = (pos_t + 1.0) / 2.0  # 归一化到[0, 1]
-            # 改进：约束在合理范围内，避免边界效应
-            pos_t = torch.clamp(pos_t, 0.05, 0.95)  # 约束在[0.05, 0.95]范围内
             
+            # 改进：处理360图像的边界连续性
+            # 关键修复：对于360图像，x坐标（经度）应该wrap around，而不是clamp
+            # y坐标（纬度）：clamp到有效范围（不是周期性的）
+            pos_t_y = torch.clamp(pos_t[:, 1], 0.02, 0.98)  # 纬度：约束在[0.02, 0.98]
+            
+            # x坐标（经度）：wrap around处理，保持周期性
+            # 对于360图像，x=0和x=1是同一个位置（左右边界连续）
+            # 使用模运算实现wrap around：x % 1.0 将值映射到[0, 1]
+            pos_t_x_raw = pos_t[:, 0]
+            # 先wrap around到[0, 1]
+            pos_t_x = pos_t_x_raw % 1.0  # wrap around到[0, 1]
+            # 然后约束在合理范围内，避免极值（0.0和1.0是同一个位置，避免使用这两个值）
+            # 如果值在[0, 0.02)或(0.98, 1]，映射到合理范围
+            # 注意：对于360图像，0.0和1.0是同一个位置，所以如果值接近这两个边界，
+            # 应该映射到另一个边界附近，而不是简单地clamp
+            pos_t_x = torch.where(
+                pos_t_x < 0.02,
+                pos_t_x + 0.98,  # 从左边wrap到右边：[0, 0.02) -> [0.98, 1.0)，但需要clamp到0.98
+                torch.where(
+                    pos_t_x > 0.98,
+                    pos_t_x - 0.98,  # 从右边wrap到左边：(0.98, 1] -> (0, 0.02]，但需要clamp到0.02
+                    pos_t_x  # 否则保持不变：[0.02, 0.98]
+                )
+            )
+            # 最终约束在[0.02, 0.98]范围内，确保数值稳定
+            pos_t_x = torch.clamp(pos_t_x, 0.02, 0.98)
+            
+            pos_t = torch.stack([pos_t_x, pos_t_y], dim=-1)  # (B, 2)
+
             # 保存mu和logvar用于计算KL散度
             if t == 0:
                 mus = [mu]
@@ -455,49 +590,83 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             else:
                 mus.append(mu)
                 logvars.append(logvar)
-            
+
             positions.append(pos_t)
-            
+
+            # 8.5. 自动停止判断（在位置预测之后，确保所有变量都已定义）
+            if enable_early_stop:
+                # 计算停止概率
+                continue_prob = self.stop_classifier(h_t.squeeze(1))  # (B, 1)
+                stop_prob = 1.0 - continue_prob  # (B, 1)
+                stop_probs.append(stop_prob)
+
+                # 推理时：判断是否应该停止
+                if not self.training:
+                    # 判断哪些样本应该停止（至少生成min_steps步）
+                    should_stop = (stop_prob.squeeze(1) > (1.0 - stop_threshold)) & (t >= min_steps - 1)  # (B,)
+
+                    # 更新实际长度（记录停止的步数）
+                    actual_lengths = torch.where(
+                        (actual_lengths == seq_len) & should_stop,
+                        torch.tensor(t + 1, device=device),
+                        actual_lengths
+                    )
+
+                    # 如果所有样本都停止了，提前退出循环
+                    if should_stop.all():
+                        break
+                # 训练时：只计算停止概率（用于损失），但不实际停止
+
             # Teacher Forcing
             if use_teacher_forcing and t < seq_len - 1:
                 if torch.rand(1).item() < teacher_forcing_ratio:
-                    prev_pos = gt_positions[:, t, :]
+                    prev_pos = gt_positions[:, t + 1, :]  # 修复：应该使用下一个位置
                 else:
                     prev_pos = pos_t.detach()
             else:
                 prev_pos = pos_t
-        
+
         # 处理变长序列：如果提前停止，需要padding到相同长度
-        max_actual_len = actual_lengths.max().item()
         actual_len = len(positions)
-        
+
         # 如果提前停止，需要padding
         if actual_len < seq_len:
             # 用最后一个位置填充
             last_pos = positions[-1]  # (B, 2)
             last_mu = mus[-1]  # (B, d_model//2)
             last_logvar = logvars[-1]  # (B, d_model//2)
-            
+
             for _ in range(seq_len - actual_len):
                 positions.append(last_pos)
                 mus.append(last_mu)
                 logvars.append(last_logvar)
                 if stop_probs:
-                    stop_probs.append(stop_probs[-1] if stop_probs else torch.zeros(B, 1, device=device))
-        
-        positions = torch.stack(positions, dim=1)  # (B, seq_len, 2)
-        mus = torch.stack(mus, dim=1)  # (B, seq_len, d_model//2)
-        logvars = torch.stack(logvars, dim=1)  # (B, seq_len, d_model//2)
-        
+                    # 如果stop_probs不为空，使用最后一个stop_prob填充
+                    stop_probs.append(stop_probs[-1])
+                elif enable_early_stop:
+                    # 如果启用early_stop但stop_probs为空（不应该发生），创建零tensor
+                    stop_probs.append(torch.zeros(B, 1, device=device))
+
+        # 修复：positions、mus、logvars是列表，每个元素是(B, ...)，应该用dim=0来stack
+        positions = torch.stack(positions, dim=0)  # (seq_len, B, 2)
+        positions = positions.transpose(0, 1)  # (B, seq_len, 2)
+
+        mus = torch.stack(mus, dim=0)  # (seq_len, B, d_model//2)
+        mus = mus.transpose(0, 1)  # (B, seq_len, d_model//2)
+
+        logvars = torch.stack(logvars, dim=0)  # (seq_len, B, d_model//2)
+        logvars = logvars.transpose(0, 1)  # (B, seq_len, d_model//2)
+
         if stop_probs:
-            stop_probs = torch.stack(stop_probs, dim=1)  # (B, actual_len, 1)
+            stop_probs = torch.stack(stop_probs, dim=0)  # (actual_len, B, 1)
+            stop_probs = stop_probs.transpose(0, 1)  # (B, actual_len, 1)
             # Padding stop_probs到seq_len
             if stop_probs.size(1) < seq_len:
                 padding = stop_probs[:, -1:].repeat(1, seq_len - stop_probs.size(1), 1)
                 stop_probs = torch.cat([stop_probs, padding], dim=1)
         else:
             stop_probs = torch.zeros(B, seq_len, 1, device=device)
-        
+
         return positions, updated_features, mus, logvars, stop_probs, actual_lengths
 
 
@@ -510,20 +679,20 @@ class MambaAdaptiveScanpath(nn.Module):
     Args:
         config: 配置对象，包含模型超参数
     """
-    
+
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.seq_len = config.seq_len
         self.feature_dim = config.feature_dim
-        
+
         # Glance网络：全局特征提取
         self.glance_net = OptimizedSphereGlanceNet(
             input_size=config.image_size,
             output_dim=config.feature_dim,
             feature_size=config.feature_size
         )
-        
+
         # Mamba-Adaptive生成器
         self.mamba_adaptive_generator = MambaAdaptiveScanpathGenerator(
             d_model=config.feature_dim,
@@ -534,10 +703,10 @@ class MambaAdaptiveScanpath(nn.Module):
             image_size=config.image_size,
             feature_size=config.feature_size
         )
-        
+
         # LayerNorm
         self.norm = nn.LayerNorm(config.feature_dim)
-    
+
     def forward(self, images, gt_scanpaths=None, teacher_forcing_ratio=0.5, temperature=1.0,
                 enable_early_stop=None, stop_threshold=0.5, min_steps=5):
         """
@@ -561,11 +730,11 @@ class MambaAdaptiveScanpath(nn.Module):
         # 自动判断是否启用early_stop
         if enable_early_stop is None:
             enable_early_stop = not self.training  # 训练时False，推理时True
-        
+
         # 1. 提取全局特征
         global_features = self.glance_net(images)  # (B, 196, 384)
         global_features = self.norm(global_features)
-        
+
         # 2. Mamba-Adaptive序列生成（带Focus和特征更新）+ VAE + 自动停止
         result = self.mamba_adaptive_generator(
             images,
@@ -578,9 +747,9 @@ class MambaAdaptiveScanpath(nn.Module):
             stop_threshold=stop_threshold,
             min_steps=min_steps
         )
-        
+
         predicted_scanpaths, _, mus, logvars, stop_probs, actual_lengths = result
-        
+
         if enable_early_stop:
             return predicted_scanpaths, mus, logvars, stop_probs, actual_lengths
         else:
