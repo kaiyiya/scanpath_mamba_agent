@@ -34,9 +34,9 @@ class MambaAdaptiveConfig:
     # 训练参数
     batch_size = 8
     num_epochs = 300  # 增加到300 epochs（参考ScanDMM的500 epochs训练策略）
-    learning_rate = 5e-5  # 初始学习率
+    learning_rate = 1e-4  # 提高初始学习率（从5e-5到1e-4），加快训练速度
     weight_decay = 2e-3  # 增加权重衰减（从1e-3提升到2e-3）
-    lr_decay = 0.9999  # 学习率衰减因子（每个epoch衰减）
+    lr_decay = 0.9995  # 学习率衰减因子（每个epoch衰减，从0.9999调整为0.9995，更快的衰减）
 
     # 数据增强
     use_augmentation = True  # 启用数据增强

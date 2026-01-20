@@ -42,10 +42,12 @@ def train():
         weight_decay=config.weight_decay
     )
 
-    # 学习率调度器 - 使用指数衰减（参考ScanDMM的训练策略）
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(
+    # 学习率调度器 - 使用余弦退火（更好的收敛性）
+    # 训练目标：学习率在前半程较高（快速学习），后半程较低（精细调优）
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        gamma=config.lr_decay
+        T_max=config.num_epochs,
+        eta_min=config.learning_rate * 0.01  # 最小学习率为初始的1%
     )
 
     # 早停机制
@@ -87,10 +89,13 @@ def train():
             true_scanpaths = batch['scanpath'].to(config.device)
 
             # 前向传播 - 传递真实位置用于Teacher Forcing
-            # 修复：降低Teacher Forcing比例，让模型更多依赖自身预测
-            # 从0.7开始（而不是0.9），更快降到0.3（而不是0.5），提高模型独立性
-            teacher_forcing_ratio = 0.7 * (0.98 ** (epoch - 1))
-            teacher_forcing_ratio = max(0.3, teacher_forcing_ratio)
+            # 改进Teacher Forcing策略：更缓慢衰减，保持训练和推理分布一致性
+            # 训练目标：确保模型既能学习真实路径，又能在推理时独立工作
+            # 策略：前100个epoch保持0.7，然后缓慢降到0.5并保持
+            if epoch <= 100:
+                teacher_forcing_ratio = 0.7
+            else:
+                teacher_forcing_ratio = max(0.5, 0.7 - (epoch - 100) * 0.002)  # 每epoch降0.002
 
             # 训练时显式设置enable_early_stop=False，确保返回3个值
             predicted_scanpaths, mus, logvars = model(
@@ -111,8 +116,9 @@ def train():
             kl_loss = kl_loss / (mus.size(0) * mus.size(1))  # 归一化
 
             # 3. Beta-VAE：控制KL散度的权重
-            # 修复：增加KL权重防止后验坍塌（从0.01开始，逐渐增加到0.05）
-            beta = min(0.05, 0.01 * (1.02 ** (epoch - 1)))
+            # 训练目标：保持VAE的随机性，但不影响主要的位置预测精度
+            # 策略：使用较小的beta值，让重构损失占主导
+            beta = min(0.01, 0.005 * (1.01 ** (epoch - 1)))  # 从0.005开始，最多到0.01
 
             # 4. 覆盖范围损失：鼓励预测路径覆盖整个图像，防止集中在中心
             # 计算预测路径的覆盖范围（x和y方向分别计算）
@@ -172,28 +178,30 @@ def train():
             else:
                 direction_loss = torch.tensor(0.0, device=predicted_scanpaths.device)
 
-            # 总损失（修复：大幅增加权重，解决预测路径集中在固定位置的问题）
-            # 问题：预测路径集中在右上角（x:0.70-0.77, y:0.22-0.27），标准差很小
-            # 解决方案：大幅增加多样性、覆盖范围和中心聚集惩罚的权重
+            # ========== 训练目标明确：位置预测精度优先 ==========
+            # 主要目标：最小化位置误差（重构损失占主导）
+            # 次要目标：保持路径合理性（正则化项权重很小，不影响主要目标）
             
-            # 动态权重：根据epoch调整，早期更注重多样性，后期更注重准确性
-            epoch_factor = min(1.0, epoch / 50.0)  # 前50个epoch逐渐增加权重
+            # 正则化权重策略：使用很小的权重，只作为轻微的引导
+            # 避免正则化项压制重构损失，确保模型优先优化位置预测精度
             
-            coverage_weight = 1.5 + 0.5 * epoch_factor  # 覆盖范围损失权重：1.5 -> 2.0
-            diversity_weight = 2.0 + 1.0 * epoch_factor  # 多样性损失权重：2.0 -> 3.0（关键！）
-            center_weight = 1.0 + 0.5 * epoch_factor  # 中心聚集惩罚权重：1.0 -> 1.5
-            smoothness_weight = 0.3  # 平滑性损失权重（保持）
-            jump_weight = 0.2  # 跳跃惩罚权重（保持）
-            direction_weight = 0.1  # 方向一致性权重（保持）
+            # 动态权重：早期稍微关注正则化，后期主要关注准确性
+            epoch_factor = min(1.0, epoch / 100.0)  # 前100个epoch逐渐调整
             
-            # 添加batch内多样性损失：鼓励不同样本之间的差异
-            # 计算batch内预测路径的多样性
+            # 大幅降低正则化权重（从原来的2.0-3.0降到0.05以下）
+            coverage_weight = 0.1 * (1.0 - 0.5 * epoch_factor)  # 覆盖范围：0.1 -> 0.05
+            diversity_weight = 0.05 * (1.0 - 0.5 * epoch_factor)  # 多样性：0.05 -> 0.025（关键！）
+            center_weight = 0.05 * (1.0 - 0.5 * epoch_factor)  # 中心聚集：0.05 -> 0.025
+            smoothness_weight = 0.1 * (1.0 - 0.3 * epoch_factor)  # 平滑性：0.1 -> 0.07
+            jump_weight = 0.05  # 跳跃惩罚：保持0.05
+            direction_weight = 0.02  # 方向一致性：降低到0.02
+            
+            # Batch内多样性损失：降低权重
             batch_mean = predicted_scanpaths.mean(dim=0, keepdim=True)  # (1, seq_len, 2)
             batch_diversity = torch.mean((predicted_scanpaths - batch_mean) ** 2)  # 标量
-            # 期望batch多样性 > 0.01（对应标准差约0.1）
             min_batch_diversity = 0.01
             batch_diversity_loss = torch.mean(((min_batch_diversity - batch_diversity).clamp(min=0.0)) ** 2)
-            batch_diversity_weight = 1.0  # batch多样性权重
+            batch_diversity_weight = 0.01 * (1.0 - 0.5 * epoch_factor)  # Batch多样性：0.01 -> 0.005
             
             # 使用加权MSE：对起始位置和前几步给予更高权重
             position_weights = torch.ones(config.seq_len, device=predicted_scanpaths.device)
@@ -220,11 +228,19 @@ def train():
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-            # 计算位置误差
-            position_error = torch.norm(
+            # 计算位置误差 - 使用加权误差（与损失函数一致，更准确地反映模型性能）
+            # 训练目标：位置误差应该与损失函数同步改善
+            position_weights_error = torch.ones(config.seq_len, device=predicted_scanpaths.device)
+            position_weights_error[0] = 5.0  # 起始位置权重5倍
+            position_weights_error[1:5] = 3.0  # 前5步权重3倍
+            position_weights_error[5:10] = 2.0  # 5-10步权重2倍
+            
+            # 加权位置误差
+            weighted_errors = torch.norm(
                 predicted_scanpaths - true_scanpaths,
                 dim=-1
-            ).mean()
+            ) * position_weights_error.unsqueeze(0)
+            position_error = weighted_errors.mean() / position_weights_error.mean()  # 归一化以保持原有尺度
 
             # 累积指标
             epoch_loss += loss.item()
@@ -275,10 +291,12 @@ def train():
                     images = batch['image'].to(config.device)
                     true_scanpaths = batch['scanpath'].to(config.device)
 
-                    # 前向传播 - 推理模式，不使用Teacher Forcing
-                    # 显式设置enable_early_stop=False，确保返回3个值（训练时）
-                    # 即使enable_early_stop=True返回5个值，我们也只取前3个
-                    result = model(images, gt_scanpaths=None, teacher_forcing_ratio=0.0, enable_early_stop=False)
+                    # 前向传播 - 验证模式
+                    # 训练目标：验证模型在推理时的真实性能
+                    # 策略：使用少量Teacher Forcing（0.1）避免训练和推理分布差异过大
+                    # 显式设置enable_early_stop=False，确保返回3个值
+                    val_teacher_forcing = 0.1  # 验证时使用少量teacher forcing
+                    result = model(images, gt_scanpaths=true_scanpaths, teacher_forcing_ratio=val_teacher_forcing, enable_early_stop=False)
                     # 安全解包：无论返回3个还是5个值，都只取前3个
                     predicted_scanpaths = result[0]
                     mus = result[1]
@@ -293,7 +311,7 @@ def train():
                     kl_loss = kl_loss / (mus.size(0) * mus.size(1))
 
                     # 3. Beta-VAE权重（与训练时相同）
-                    beta = min(0.05, 0.01 * (1.02 ** (epoch - 1)))
+                    beta = min(0.01, 0.005 * (1.01 ** (epoch - 1)))
 
                     # 4. 覆盖范围损失（与训练时一致）
                     pred_min = predicted_scanpaths.min(dim=1)[0]
@@ -348,14 +366,14 @@ def train():
                     )
 
                     # 总损失（与训练时完全一致）
-                    epoch_factor = min(1.0, epoch / 50.0)
-                    coverage_weight = 1.5 + 0.5 * epoch_factor
-                    diversity_weight = 2.0 + 1.0 * epoch_factor
-                    center_weight = 1.0 + 0.5 * epoch_factor
-                    smoothness_weight = 0.3
-                    jump_weight = 0.2
-                    direction_weight = 0.1
-                    batch_diversity_weight = 1.0
+                    epoch_factor = min(1.0, epoch / 100.0)
+                    coverage_weight = 0.1 * (1.0 - 0.5 * epoch_factor)
+                    diversity_weight = 0.05 * (1.0 - 0.5 * epoch_factor)
+                    center_weight = 0.05 * (1.0 - 0.5 * epoch_factor)
+                    smoothness_weight = 0.1 * (1.0 - 0.3 * epoch_factor)
+                    jump_weight = 0.05
+                    direction_weight = 0.02
+                    batch_diversity_weight = 0.01 * (1.0 - 0.5 * epoch_factor)
                     
                     loss = weighted_reconstruction_loss + beta * kl_loss + \
                            coverage_weight * coverage_loss + \
@@ -366,11 +384,17 @@ def train():
                            direction_weight * direction_loss + \
                            batch_diversity_weight * batch_diversity_loss
 
-                    # 计算位置误差
-                    position_error = torch.norm(
+                    # 计算位置误差（与训练时一致，使用加权误差）
+                    position_weights_error = torch.ones(config.seq_len, device=predicted_scanpaths.device)
+                    position_weights_error[0] = 5.0
+                    position_weights_error[1:5] = 3.0
+                    position_weights_error[5:10] = 2.0
+                    
+                    weighted_errors = torch.norm(
                         predicted_scanpaths - true_scanpaths,
                         dim=-1
-                    ).mean()
+                    ) * position_weights_error.unsqueeze(0)
+                    position_error = weighted_errors.mean() / position_weights_error.mean()
 
                     val_loss += loss.item()
                     val_position_error += position_error.item()
