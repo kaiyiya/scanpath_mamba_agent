@@ -128,13 +128,24 @@ def train():
             beta = min(0.005, 0.001 * (1.01 ** (epoch - 1)))  # 从0.001开始，最多到0.005
 
             # 4. 覆盖范围损失：鼓励预测路径覆盖整个图像，防止过度聚集
-            # 计算预测路径的覆盖范围（x和y方向分别计算）
+            # 激进改进：分别约束X和Y方向的覆盖范围
             pred_min = predicted_scanpaths.min(dim=1)[0]  # (B, 2)
             pred_max = predicted_scanpaths.max(dim=1)[0]  # (B, 2)
             pred_range = pred_max - pred_min  # (B, 2)
-            # 改进：使用更温和的惩罚，只在覆盖范围非常小时才惩罚
-            # 阈值降低到0.3，惩罚强度降低，避免过度约束
-            coverage_loss = torch.mean(((0.3 - pred_range).clamp(min=0.0)) ** 2) * 0.5  # 降低惩罚强度
+
+            # 分别处理X和Y方向的覆盖范围
+            pred_range_x = pred_range[:, 0]  # (B,)
+            pred_range_y = pred_range[:, 1]  # (B,)
+
+            # Y方向需要更大的覆盖范围（当前y均值都在0.49-0.51，太集中）
+            min_range_x = 0.3  # x方向最小覆盖范围
+            min_range_y = 0.25  # y方向最小覆盖范围（提高要求）
+
+            coverage_loss_x = torch.mean(((min_range_x - pred_range_x).clamp(min=0.0)) ** 2)
+            coverage_loss_y = torch.mean(((min_range_y - pred_range_y).clamp(min=0.0)) ** 2)
+
+            # Y方向给予更高权重
+            coverage_loss = coverage_loss_x + 3.0 * coverage_loss_y
             
             # 5. 位置多样性损失：鼓励预测位置具有足够的方差
             # 方案1：分别约束X和Y方向的多样性（关键改进！）
@@ -145,16 +156,17 @@ def train():
             pred_var_x = pred_var[:, 0]  # (B,)
             pred_var_y = pred_var[:, 1]  # (B,)
 
-            # Y方向需要更高的多样性阈值（因为当前Y方向标准差只有0.03-0.05）
-            min_var_x = 0.015  # x方向标准差约0.12
-            min_var_y = 0.020  # y方向标准差约0.14 (提高！)
+            # Y方向需要更高的多样性阈值（当前Y方向标准差只有0.04-0.07，目标0.10-0.15）
+            # 激进改进：大幅提高Y方向阈值和权重
+            min_var_x = 0.015  # x方向标准差约0.12（已达标）
+            min_var_y = 0.025  # y方向标准差约0.16（从0.020提高到0.025）
 
             # 计算多样性损失
             diversity_loss_x = torch.mean(((min_var_x - pred_var_x).clamp(min=0.0)) ** 2)
             diversity_loss_y = torch.mean(((min_var_y - pred_var_y).clamp(min=0.0)) ** 2)
 
-            # Y方向给予更高权重（2倍）
-            diversity_loss = diversity_loss_x + 2.0 * diversity_loss_y
+            # Y方向给予更高权重（从2倍提高到5倍！）
+            diversity_loss = diversity_loss_x + 5.0 * diversity_loss_y
             
             # 6. 边界约束：防止预测跑到图像边界外
             # 方案4：放宽边界约束，降低惩罚强度
@@ -170,9 +182,18 @@ def train():
                 above_boundary * (predicted_scanpaths - boundary_max) ** 2
             ) * 2.0  # 从10.0降低到2.0，只防止完全越界
             
-            # 7. 中心聚集惩罚：完全移除
-            # 方案3：移除中心惩罚，让模型自由探索
-            center_penalty = torch.tensor(0.0, device=predicted_scanpaths.device)
+            # 7. Y方向中心聚集惩罚：专门针对Y方向的中心聚集问题
+            # 新增：Y方向均值过于集中在0.5附近（0.49-0.51），需要惩罚
+            pred_mean_y = pred_mean[:, 1]  # (B,) Y方向的均值
+
+            # 惩罚Y方向均值过于接近0.5
+            y_center_dist = torch.abs(pred_mean_y - 0.5)  # 距离中心的距离
+            # 当距离小于0.1时（即均值在[0.4, 0.6]），给予惩罚
+            y_too_centered = (y_center_dist < 0.1).float()
+            y_center_penalty = torch.mean(y_too_centered * (0.1 - y_center_dist) ** 2) * 10.0
+
+            # X方向不惩罚（已经足够分散）
+            center_penalty = y_center_penalty
             point_center_penalty = torch.tensor(0.0, device=predicted_scanpaths.device)
 
             # 8. 轨迹平滑性损失：鼓励相邻点之间的距离合理，使路径连贯流畅
@@ -239,65 +260,64 @@ def train():
             else:
                 direction_continuity_loss = torch.tensor(0.0, device=predicted_scanpaths.device)
 
-            # ========== 改进的损失权重策略 ==========
+            # ========== 更激进的损失权重策略 ==========
             # 核心改进：
-            # 1. 移除中心惩罚（center_weight = 0）
-            # 2. 大幅增加平滑性权重
-            # 3. 降低边界约束强度
-            # 4. 保持多样性约束但不过度
+            # 1. 大幅提高Y方向多样性和覆盖范围权重
+            # 2. 进一步增强平滑性约束
+            # 3. 降低重构损失的主导地位
 
             if epoch <= 80:
-                # 阶段1：重构损失占主导，加入必要的平滑性约束
-                coverage_weight = 0.05  # 覆盖范围
-                diversity_weight = 0.1  # 多样性（提高）
-                center_weight = 0.0  # 完全移除中心惩罚
-                boundary_weight = 0.3  # 边界约束（降低）
-                point_center_weight = 0.0  # 移除
-                smoothness_weight = 1.0  # 平滑性（大幅提高，从0.15到1.0）
-                jump_weight = 0.5  # 跳跃惩罚（提高，从0.05到0.5）
-                direction_weight = 0.3  # 方向一致性（提高，从0.05到0.3）
-                acceleration_weight = 0.3  # 加速度约束（提高）
-                direction_continuity_weight = 0.3  # 方向连续性（提高）
-            elif epoch <= 150:
-                # 阶段2：逐渐增加多样性约束
-                progress = (epoch - 80) / 70.0
-                coverage_weight = 0.05 + 0.05 * progress  # 0.05 -> 0.10
-                diversity_weight = 0.1 + 0.1 * progress  # 0.1 -> 0.2
-                center_weight = 0.0  # 保持为0
-                boundary_weight = 0.3  # 保持
-                point_center_weight = 0.0  # 保持为0
-                smoothness_weight = 1.0  # 保持
-                jump_weight = 0.5  # 保持
-                direction_weight = 0.3  # 保持
-                acceleration_weight = 0.3  # 保持
-                direction_continuity_weight = 0.3  # 保持
-            else:
-                # 阶段3：平衡优化
-                coverage_weight = 0.10
-                diversity_weight = 0.2
-                center_weight = 0.0  # 保持为0
-                boundary_weight = 0.3
+                # 阶段1：平衡重构和多样性
+                coverage_weight = 0.3  # 大幅提高（从0.05到0.3）
+                diversity_weight = 0.5  # 大幅提高（从0.1到0.5）
+                center_weight = 0.3  # Y方向中心惩罚
+                boundary_weight = 0.2  # 进一步降低
                 point_center_weight = 0.0
-                smoothness_weight = 1.0
-                jump_weight = 0.5
-                direction_weight = 0.3
-                acceleration_weight = 0.3
-                direction_continuity_weight = 0.3
+                smoothness_weight = 1.5  # 进一步提高（从1.0到1.5）
+                jump_weight = 0.8  # 提高（从0.5到0.8）
+                direction_weight = 0.5  # 提高（从0.3到0.5）
+                acceleration_weight = 0.5  # 提高（从0.3到0.5）
+                direction_continuity_weight = 0.5  # 提高（从0.3到0.5）
+            elif epoch <= 150:
+                # 阶段2：进一步增加多样性约束
+                progress = (epoch - 80) / 70.0
+                coverage_weight = 0.3 + 0.2 * progress  # 0.3 -> 0.5
+                diversity_weight = 0.5 + 0.3 * progress  # 0.5 -> 0.8
+                center_weight = 0.3 + 0.2 * progress  # 0.3 -> 0.5
+                boundary_weight = 0.2
+                point_center_weight = 0.0
+                smoothness_weight = 1.5
+                jump_weight = 0.8
+                direction_weight = 0.5
+                acceleration_weight = 0.5
+                direction_continuity_weight = 0.5
+            else:
+                # 阶段3：最大多样性约束
+                coverage_weight = 0.5
+                diversity_weight = 0.8
+                center_weight = 0.5  # Y方向中心惩罚
+                boundary_weight = 0.2
+                point_center_weight = 0.0
+                smoothness_weight = 1.5
+                jump_weight = 0.8
+                direction_weight = 0.5
+                acceleration_weight = 0.5
+                direction_continuity_weight = 0.5
             
-            # Batch内多样性损失：降低权重
+            # Batch内多样性损失：提高权重
             batch_mean = predicted_scanpaths.mean(dim=0, keepdim=True)  # (1, seq_len, 2)
             batch_diversity = torch.mean((predicted_scanpaths - batch_mean) ** 2)  # 标量
-            min_batch_diversity = 0.01
+            min_batch_diversity = 0.015  # 提高阈值（从0.01到0.015）
             batch_diversity_loss = torch.mean(((min_batch_diversity - batch_diversity).clamp(min=0.0)) ** 2)
 
-            # 降低batch多样性权重
+            # 提高batch多样性权重
             if epoch <= 80:
-                batch_diversity_weight = 0.05  # 适度权重
+                batch_diversity_weight = 0.2  # 提高（从0.05到0.2）
             elif epoch <= 150:
                 progress = (epoch - 80) / 70.0
-                batch_diversity_weight = 0.05 + 0.05 * progress  # 0.05 -> 0.10
+                batch_diversity_weight = 0.2 + 0.1 * progress  # 0.2 -> 0.3
             else:
-                batch_diversity_weight = 0.10  # 保持
+                batch_diversity_weight = 0.3  # 保持
             
             # 使用加权MSE：对起始位置和前几步给予更高权重
             # 降低权重差异，更平衡前后步骤
