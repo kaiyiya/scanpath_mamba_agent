@@ -138,11 +138,29 @@ def train():
             diversity_loss = torch.mean(((min_var - pred_var).clamp(min=0.0)) ** 2)
             
             # 6. 中心聚集惩罚：惩罚预测均值过于接近图像中心(0.5, 0.5)
+            # 问题：360度全景图路径集中在中心区域，需要强制分散
             # 计算每个样本的均值距离中心的距离
             mean_center_dist = torch.mean((pred_mean - 0.5) ** 2, dim=-1)  # (B,)
-            # 修复：使用更强的惩罚，当均值在[0.4, 0.6]范围内时给予惩罚
-            # 使用分段函数：距离<0.01时给予最大惩罚，距离>0.05时不给惩罚
-            center_penalty = torch.mean(torch.exp(-mean_center_dist * 50.0))  # 增强惩罚强度（从20到50）
+            
+            # 改进的惩罚策略：分阶段惩罚
+            # 1. 当距离<0.02时（均值在[0.45, 0.55]），给予强惩罚
+            # 2. 当距离<0.05时（均值在[0.4, 0.6]），给予中等惩罚
+            # 3. 当距离>=0.05时，不给惩罚
+            close_to_center = (mean_center_dist < 0.02).float()
+            medium_distance = ((mean_center_dist >= 0.02) & (mean_center_dist < 0.05)).float()
+            
+            # 强惩罚：距离中心很近的点
+            strong_penalty = torch.mean(close_to_center * (0.02 - mean_center_dist) * 100.0)
+            # 中等惩罚：距离中心较近的点
+            medium_penalty = torch.mean(medium_distance * (0.05 - mean_center_dist) * 20.0)
+            
+            center_penalty = strong_penalty + medium_penalty
+            
+            # 额外的中心聚集惩罚：直接惩罚预测点集中在中心区域
+            # 计算所有预测点到中心的平均距离
+            point_center_dist = torch.mean((predicted_scanpaths - 0.5) ** 2, dim=-1)  # (B, seq_len)
+            # 当点的平均距离<0.02时（非常接近中心），给予惩罚
+            point_center_penalty = torch.mean(((0.02 - point_center_dist).clamp(min=0.0)) ** 2) * 50.0
 
             # 7. 轨迹平滑性损失：鼓励相邻点之间的距离合理，使路径连贯流畅
             # 计算相邻点之间的步长
@@ -178,20 +196,22 @@ def train():
             else:
                 direction_loss = torch.tensor(0.0, device=predicted_scanpaths.device)
 
-            # ========== 训练目标明确：位置预测精度优先 ==========
+            # ========== 训练目标明确：位置预测精度优先，但必须避免中心聚集 ==========
             # 主要目标：最小化位置误差（重构损失占主导）
-            # 次要目标：保持路径合理性（正则化项权重很小，不影响主要目标）
+            # 关键约束：路径必须分散，不能集中在中心（360度全景图的关键要求）
+            # 次要目标：保持路径合理性（平滑性等）
             
-            # 正则化权重策略：使用很小的权重，只作为轻微的引导
-            # 避免正则化项压制重构损失，确保模型优先优化位置预测精度
+            # 正则化权重策略：平衡位置精度和路径分散性
+            # 问题：之前降低权重导致路径集中在中心区域，需要提高中心聚集和覆盖范围权重
             
-            # 动态权重：早期稍微关注正则化，后期主要关注准确性
+            # 动态权重：早期更关注分散性，后期平衡精度和分散性
             epoch_factor = min(1.0, epoch / 100.0)  # 前100个epoch逐渐调整
             
-            # 大幅降低正则化权重（从原来的2.0-3.0降到0.05以下）
-            coverage_weight = 0.1 * (1.0 - 0.5 * epoch_factor)  # 覆盖范围：0.1 -> 0.05
-            diversity_weight = 0.05 * (1.0 - 0.5 * epoch_factor)  # 多样性：0.05 -> 0.025（关键！）
-            center_weight = 0.05 * (1.0 - 0.5 * epoch_factor)  # 中心聚集：0.05 -> 0.025
+            # 调整正则化权重：提高覆盖范围和中心聚集惩罚权重（解决中心聚集问题）
+            coverage_weight = 0.5 + 0.3 * (1.0 - epoch_factor)  # 覆盖范围：0.8 -> 0.5（提高！）
+            diversity_weight = 0.1 * (1.0 - 0.3 * epoch_factor)  # 多样性：0.1 -> 0.07（保持较小）
+            center_weight = 0.8 + 0.4 * (1.0 - epoch_factor)  # 中心聚集：1.2 -> 0.8（大幅提高！）⚠️关键
+            point_center_weight = 0.5 + 0.3 * (1.0 - epoch_factor)  # 点中心惩罚：0.8 -> 0.5（新增）
             smoothness_weight = 0.1 * (1.0 - 0.3 * epoch_factor)  # 平滑性：0.1 -> 0.07
             jump_weight = 0.05  # 跳跃惩罚：保持0.05
             direction_weight = 0.02  # 方向一致性：降低到0.02
@@ -217,6 +237,7 @@ def train():
                    coverage_weight * coverage_loss + \
                    diversity_weight * diversity_loss + \
                    center_weight * center_penalty + \
+                   point_center_weight * point_center_penalty + \
                    smoothness_weight * step_length_loss + \
                    jump_weight * jump_penalty + \
                    direction_weight * direction_loss + \
@@ -256,6 +277,7 @@ def train():
                 avg_smooth = step_length_loss.item()
                 avg_jump = jump_penalty.item()
                 avg_batch_div = batch_diversity_loss.item()
+                avg_point_center = point_center_penalty.item()
                 train_bar.set_postfix({
                     'Loss': f"{avg_loss:.4f}",
                     'PosErr': f"{avg_error:.4f}",
@@ -264,6 +286,7 @@ def train():
                     'Div': f"{avg_diversity:.4f}",
                     'BDiv': f"{avg_batch_div:.4f}",
                     'Ctr': f"{avg_center:.4f}",
+                    'PCtr': f"{avg_point_center:.4f}",
                     'Smooth': f"{avg_smooth:.4f}",
                     'Jump': f"{avg_jump:.4f}",
                 })
@@ -327,7 +350,15 @@ def train():
                     
                     # 6. 中心聚集惩罚（与训练时一致）
                     mean_center_dist = torch.mean((pred_mean - 0.5) ** 2, dim=-1)
-                    center_penalty = torch.mean(torch.exp(-mean_center_dist * 50.0))
+                    close_to_center = (mean_center_dist < 0.02).float()
+                    medium_distance = ((mean_center_dist >= 0.02) & (mean_center_dist < 0.05)).float()
+                    strong_penalty = torch.mean(close_to_center * (0.02 - mean_center_dist) * 100.0)
+                    medium_penalty = torch.mean(medium_distance * (0.05 - mean_center_dist) * 20.0)
+                    center_penalty = strong_penalty + medium_penalty
+                    
+                    # 额外的点中心惩罚
+                    point_center_dist = torch.mean((predicted_scanpaths - 0.5) ** 2, dim=-1)
+                    point_center_penalty = torch.mean(((0.02 - point_center_dist).clamp(min=0.0)) ** 2) * 50.0
                     
                     # 7. 轨迹平滑性损失（与训练时一致）
                     pred_diffs = predicted_scanpaths[:, 1:] - predicted_scanpaths[:, :-1]
@@ -367,9 +398,10 @@ def train():
 
                     # 总损失（与训练时完全一致）
                     epoch_factor = min(1.0, epoch / 100.0)
-                    coverage_weight = 0.1 * (1.0 - 0.5 * epoch_factor)
-                    diversity_weight = 0.05 * (1.0 - 0.5 * epoch_factor)
-                    center_weight = 0.05 * (1.0 - 0.5 * epoch_factor)
+                    coverage_weight = 0.5 + 0.3 * (1.0 - epoch_factor)
+                    diversity_weight = 0.1 * (1.0 - 0.3 * epoch_factor)
+                    center_weight = 0.8 + 0.4 * (1.0 - epoch_factor)
+                    point_center_weight = 0.5 + 0.3 * (1.0 - epoch_factor)
                     smoothness_weight = 0.1 * (1.0 - 0.3 * epoch_factor)
                     jump_weight = 0.05
                     direction_weight = 0.02
@@ -379,6 +411,7 @@ def train():
                            coverage_weight * coverage_loss + \
                            diversity_weight * diversity_loss + \
                            center_weight * center_penalty + \
+                           point_center_weight * point_center_penalty + \
                            smoothness_weight * step_length_loss + \
                            jump_weight * jump_penalty + \
                            direction_weight * direction_loss + \
