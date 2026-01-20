@@ -144,28 +144,44 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
         )
         
         # ==================== VAE概率建模 ====================
-        # 预测隐变量的均值和方差
-        self.latent_mu = nn.Linear(d_model, d_model // 2)
-        self.latent_logvar = nn.Linear(d_model, d_model // 2)
+        # 改进：增强位置信息融合，使用位置特征直接参与解码
+        # 预测隐变量的均值和方差（融合位置信息）
+        self.latent_mu = nn.Sequential(
+            nn.Linear(d_model + 2, d_model),  # 加入位置信息
+            nn.LayerNorm(d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model // 2)
+        )
+        self.latent_logvar = nn.Sequential(
+            nn.Linear(d_model + 2, d_model),  # 加入位置信息
+            nn.LayerNorm(d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model // 2)
+        )
         
-        # 从隐变量解码位置
-        # 改进：使用更好的初始化策略，让输出更容易覆盖全范围
+        # 从隐变量解码位置（改进：使用位置信息增强）
         self.position_decoder = nn.Sequential(
+            nn.Linear(d_model // 2 + 2, d_model // 2),  # 加入位置信息
+            nn.LayerNorm(d_model // 2),
+            nn.GELU(),
+            nn.Dropout(0.3),
             nn.Linear(d_model // 2, d_model // 4),
             nn.LayerNorm(d_model // 4),
             nn.GELU(),
-            nn.Dropout(0.4),
+            nn.Dropout(0.3),
             nn.Linear(d_model // 4, 2),
             nn.Tanh()
         )
         
         # 改进初始化：让位置解码器输出更容易覆盖全范围
         # 初始化最后一层，使用更合理的初始化策略
-        nn.init.normal_(self.position_decoder[-2].weight, mean=0.0, std=0.1)  # 使用正态分布初始化
+        nn.init.normal_(self.position_decoder[-2].weight, mean=0.0, std=0.15)  # 增加std以提高多样性
         nn.init.constant_(self.position_decoder[-2].bias, 0.0)  # 初始化为0，Tanh后为0（转换后为0.5）
         
-        # 改进：初始化logvar层，使用更合理的初始方差
-        nn.init.constant_(self.latent_logvar.bias, -2.0)  # 初始logvar=-2，对应std≈0.37，更合理的初始多样性
+        # 改进：初始化logvar层，使用更合理的初始方差（增加初始多样性）
+        # 注意：latent_logvar是Sequential，需要初始化最后一层的bias
+        if hasattr(self.latent_logvar[-1], 'bias') and self.latent_logvar[-1].bias is not None:
+            nn.init.constant_(self.latent_logvar[-1].bias, -1.5)  # 初始logvar=-1.5，对应std≈0.47，增加初始多样性
     
     def reparameterize(self, mu, logvar, temperature=1.0):
         """
@@ -302,27 +318,40 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
         # 判断是否使用Teacher Forcing
         use_teacher_forcing = gt_positions is not None and self.training
         
-        # 初始位置
-        if use_teacher_forcing:
-            prev_pos = gt_positions[:, 0, :].clone()  # 训练时使用真实起始点
+        # 初始位置（改进：训练和推理使用一致的策略）
+        # 关键问题：训练时使用真实起始点，推理时从边缘随机选择，导致分布不匹配
+        # 改进：训练时也使用随机初始位置（但可以通过Teacher Forcing在第一步使用真实位置）
+        if use_teacher_forcing and torch.rand(1).item() < teacher_forcing_ratio:
+            # 训练时：按Teacher Forcing比例使用真实起始点
+            prev_pos = gt_positions[:, 0, :].clone()
         else:
-            # 改进：从边缘区域随机选择初始位置，而不是从中心
-            # 这更符合真实扫描路径通常从图像边缘开始的特点
-            # 在图像的四个象限边缘附近随机选择
-            # 方案：随机选择边缘区域（0-0.2 或 0.8-1.0）
+            # 改进：使用更合理的初始位置分布
+            # 方案1：从整个图像范围随机选择（更符合真实分布）
+            # 方案2：从边缘区域随机选择（更符合扫描路径通常从边缘开始的特点）
+            # 使用方案1和方案2的混合：70%从边缘，30%从全图
+            use_edge = torch.rand(B, device=device) < 0.7
+            
+            # 边缘位置：从四个边缘区域随机选择
             edge_choices = torch.rand(B, 2, device=device)
-            # 随机选择是在左边缘还是右边缘（x方向）
             x_mask = edge_choices[:, 0] < 0.5
-            x_positions = torch.where(x_mask, 
-                                     torch.rand(B, device=device) * 0.2,  # 左边缘 [0, 0.2]
-                                     torch.rand(B, device=device) * 0.2 + 0.8)  # 右边缘 [0.8, 1.0]
-            # 随机选择是在上边缘还是下边缘（y方向）
+            x_positions_edge = torch.where(x_mask, 
+                                          torch.rand(B, device=device) * 0.2,  # 左边缘 [0, 0.2]
+                                          torch.rand(B, device=device) * 0.2 + 0.8)  # 右边缘 [0.8, 1.0]
             y_mask = edge_choices[:, 1] < 0.5
-            y_positions = torch.where(y_mask,
-                                     torch.rand(B, device=device) * 0.2,  # 上边缘 [0, 0.2]
-                                     torch.rand(B, device=device) * 0.2 + 0.8)  # 下边缘 [0.8, 1.0]
+            y_positions_edge = torch.where(y_mask,
+                                          torch.rand(B, device=device) * 0.2,  # 上边缘 [0, 0.2]
+                                          torch.rand(B, device=device) * 0.2 + 0.8)  # 下边缘 [0.8, 1.0]
+            
+            # 全图位置：从整个图像范围随机选择
+            x_positions_full = torch.rand(B, device=device)  # [0, 1]
+            y_positions_full = torch.rand(B, device=device)  # [0, 1]
+            
+            # 混合：70%边缘，30%全图
+            x_positions = torch.where(use_edge, x_positions_edge, x_positions_full)
+            y_positions = torch.where(use_edge, y_positions_edge, y_positions_full)
             
             prev_pos = torch.stack([x_positions, y_positions], dim=1)  # (B, 2)
+            prev_pos = torch.clamp(prev_pos, 0.05, 0.95)  # 约束在合理范围内
         
         positions = []
         updated_features = global_features
@@ -395,18 +424,26 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
                 stop_prob = 1.0 - continue_prob
                 stop_probs.append(stop_prob)
             
-            # 9. VAE位置预测：概率建模防止过拟合
+            # 9. VAE位置预测：概率建模防止过拟合（改进：融合位置信息）
             combined_features = h_t.squeeze(1) + fused_features.squeeze(1)  # (B, d_model)
             
-            # 预测隐变量的均值和方差
-            mu = self.latent_mu(combined_features)  # (B, d_model//2)
-            logvar = self.latent_logvar(combined_features)  # (B, d_model//2)
+            # 融合当前位置信息到特征中（改进：增强位置信息）
+            features_with_pos = torch.cat([combined_features, prev_pos], dim=-1)  # (B, d_model+2)
+            
+            # 预测隐变量的均值和方差（使用融合位置信息的特征）
+            mu = self.latent_mu(features_with_pos)  # (B, d_model//2)
+            logvar = self.latent_logvar(features_with_pos)  # (B, d_model//2)
+            
+            # 改进：动态调整logvar，确保有足够的多样性
+            # 当logvar太小时，增加一个最小值，防止采样过于集中
+            logvar = torch.clamp(logvar, min=-3.0, max=2.0)  # 限制logvar范围，确保std在[0.05, 2.7]
             
             # 重参数化采样（推理时增加温度以提高多样性）
             z = self.reparameterize(mu, logvar, temperature=temperature)  # (B, d_model//2)
             
-            # 从隐变量解码位置
-            pos_t = self.position_decoder(z)  # (B, 2), 范围[-1, 1]
+            # 从隐变量解码位置（融合当前位置信息）
+            z_with_pos = torch.cat([z, prev_pos], dim=-1)  # (B, d_model//2+2)
+            pos_t = self.position_decoder(z_with_pos)  # (B, 2), 范围[-1, 1]
             pos_t = (pos_t + 1.0) / 2.0  # 归一化到[0, 1]
             # 改进：约束在合理范围内，避免边界效应
             pos_t = torch.clamp(pos_t, 0.05, 0.95)  # 约束在[0.05, 0.95]范围内

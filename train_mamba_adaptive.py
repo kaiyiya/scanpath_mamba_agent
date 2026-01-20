@@ -91,19 +91,18 @@ def train():
             true_scanpaths = batch['scanpath'].to(config.device)
 
             # 前向传播 - 传递真实位置用于Teacher Forcing
-            # 改进Teacher Forcing策略：分阶段调整，与训练阶段对齐
-            # 阶段1: 保持高Teacher Forcing，让模型充分学习真实路径
-            # 阶段2: 逐渐降低，让模型更多依赖自身预测
-            # 阶段3: 进一步降低，但保持一定比例避免分布不匹配
-            if epoch <= 80:
-                teacher_forcing_ratio = 0.8  # 阶段1：高Teacher Forcing（提高！）
-            elif epoch <= 150:
-                # 阶段2：从0.8逐渐降到0.6
-                progress = (epoch - 80) / 70.0
-                teacher_forcing_ratio = 0.8 - 0.2 * progress
+            # 改进Teacher Forcing策略：降低比例，减少训练和推理分布差异
+            # 关键问题：之前0.8的Teacher Forcing太高，导致训练和推理分布差异大
+            # 改进：使用更低的Teacher Forcing，让模型更多依赖自身预测
+            if epoch <= 50:
+                teacher_forcing_ratio = 0.5  # 阶段1：中等Teacher Forcing（从0.8降到0.5）
+            elif epoch <= 100:
+                # 阶段2：从0.5逐渐降到0.3
+                progress = (epoch - 50) / 50.0
+                teacher_forcing_ratio = 0.5 - 0.2 * progress
             else:
-                # 阶段3：保持0.6，避免训练和推理分布差异过大
-                teacher_forcing_ratio = 0.6
+                # 阶段3：保持0.3，更接近推理时的0.0
+                teacher_forcing_ratio = 0.3
 
             # 训练时显式设置enable_early_stop=False，确保返回3个值
             predicted_scanpaths, mus, logvars = model(
@@ -414,14 +413,14 @@ def train():
 
                     # 前向传播 - 验证模式
                     # 训练目标：验证模型在推理时的真实性能
-                    # 策略：与训练阶段对齐的Teacher Forcing，避免分布差异过大
+                    # 策略：使用更低的Teacher Forcing，更接近推理时的0.0
                     # 显式设置enable_early_stop=False，确保返回3个值
-                    if epoch <= 80:
-                        val_teacher_forcing = 0.3  # 阶段1：较高Teacher Forcing
-                    elif epoch <= 150:
-                        val_teacher_forcing = 0.2  # 阶段2：中等Teacher Forcing
+                    if epoch <= 50:
+                        val_teacher_forcing = 0.2  # 阶段1：较低Teacher Forcing（从0.3降到0.2）
+                    elif epoch <= 100:
+                        val_teacher_forcing = 0.1  # 阶段2：更低Teacher Forcing（从0.2降到0.1）
                     else:
-                        val_teacher_forcing = 0.1  # 阶段3：较低Teacher Forcing
+                        val_teacher_forcing = 0.05  # 阶段3：非常低Teacher Forcing（从0.1降到0.05）
                     result = model(images, gt_scanpaths=true_scanpaths, teacher_forcing_ratio=val_teacher_forcing, enable_early_stop=False)
                     # 安全解包：无论返回3个还是5个值，都只取前3个
                     predicted_scanpaths = result[0]
