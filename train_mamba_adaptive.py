@@ -203,6 +203,35 @@ def train():
                 )
             else:
                 direction_loss = torch.tensor(0.0, device=predicted_scanpaths.device)
+            
+            # 平滑性损失4：加速度约束（步长的变化应该平滑，保证路径流畅）
+            # 计算加速度：相邻步长之间的变化
+            if pred_step_lengths.shape[1] > 1:  # 确保有足够的步长计算加速度
+                pred_acceleration = pred_step_lengths[:, 1:] - pred_step_lengths[:, :-1]  # (B, seq_len-2)
+                true_acceleration = true_step_lengths[:, 1:] - true_step_lengths[:, :-1]
+                acceleration_loss = nn.functional.mse_loss(pred_acceleration, true_acceleration)
+            else:
+                acceleration_loss = torch.tensor(0.0, device=predicted_scanpaths.device)
+            
+            # 平滑性损失5：方向连续性（相邻方向应该相似，避免突然转向）
+            if pred_directions.shape[1] > 0:
+                # 计算相邻方向的余弦相似度
+                pred_dir_similarity = F.cosine_similarity(
+                    pred_directions[:, :-1], 
+                    pred_directions[:, 1:], 
+                    dim=-1
+                )  # (B, seq_len-2)
+                true_dir_similarity = F.cosine_similarity(
+                    true_directions[:, :-1], 
+                    true_directions[:, 1:], 
+                    dim=-1
+                )
+                direction_continuity_loss = nn.functional.mse_loss(
+                    pred_dir_similarity, 
+                    true_dir_similarity
+                )
+            else:
+                direction_continuity_loss = torch.tensor(0.0, device=predicted_scanpaths.device)
 
             # ========== 分阶段训练策略：位置精度优先 ==========
             # 核心问题：正则化权重过高导致Epoch 80后位置误差突然上升
@@ -213,33 +242,38 @@ def train():
             # 阶段3 (Epoch 151+): 如果位置误差足够低，适当增加正则化
             
             if epoch <= 80:
-                # 阶段1：重构损失占绝对主导（90%以上），只保留轻微平滑性约束
-                coverage_weight = 0.0  # 不加入覆盖范围惩罚
+                # 阶段1：重构损失占主导，但必须保证路径平滑性和合理性
+                # 问题：路径不平滑、聚集，需要提高平滑性权重和加入轻微正则化
+                coverage_weight = 0.05  # 轻微覆盖范围约束（从0提高到0.05）
                 diversity_weight = 0.0  # 不加入多样性惩罚
-                center_weight = 0.0  # 不加入中心聚集惩罚
-                point_center_weight = 0.0  # 不加入点中心惩罚
-                smoothness_weight = 0.05  # 保留轻微平滑性（5%）
-                jump_weight = 0.02  # 保留轻微跳跃惩罚（2%）
-                direction_weight = 0.01  # 保留轻微方向一致性（1%）
+                center_weight = 0.05  # 轻微中心聚集惩罚（从0提高到0.05）
+                point_center_weight = 0.03  # 轻微点中心惩罚（从0提高到0.03）
+                smoothness_weight = 0.25  # 提高平滑性权重（从0.05提高到0.25）⚠️关键
+                jump_weight = 0.1  # 提高跳跃惩罚（从0.02提高到0.1）
+                direction_weight = 0.1  # 提高方向一致性（从0.01提高到0.1）⚠️关键
             elif epoch <= 150:
-                # 阶段2：逐渐加入轻微正则化
+                # 阶段2：逐渐增加正则化，保持高平滑性权重
                 progress = (epoch - 80) / 70.0  # 0.0 -> 1.0
-                coverage_weight = 0.1 * progress  # 逐渐从0增加到0.1
+                coverage_weight = 0.05 + 0.1 * progress  # 从0.05逐渐增加到0.15
                 diversity_weight = 0.05 * progress  # 逐渐从0增加到0.05
-                center_weight = 0.1 * progress  # 逐渐从0增加到0.1
-                point_center_weight = 0.05 * progress  # 逐渐从0增加到0.05
-                smoothness_weight = 0.05 + 0.05 * progress  # 从0.05增加到0.1
-                jump_weight = 0.02 + 0.03 * progress  # 从0.02增加到0.05
-                direction_weight = 0.01 + 0.01 * progress  # 从0.01增加到0.02
+                center_weight = 0.05 + 0.1 * progress  # 从0.05逐渐增加到0.15
+                point_center_weight = 0.03 + 0.05 * progress  # 从0.03逐渐增加到0.08
+                smoothness_weight = 0.25 + 0.1 * progress  # 从0.25增加到0.35（保持高权重）
+                jump_weight = 0.1 + 0.05 * progress  # 从0.1增加到0.15
+                direction_weight = 0.1 + 0.05 * progress  # 从0.1增加到0.15
+                acceleration_weight = 0.1 + 0.05 * progress  # 加速度约束：从0.1增加到0.15
+                direction_continuity_weight = 0.1 + 0.05 * progress  # 方向连续性：从0.1增加到0.15
             else:
-                # 阶段3：如果位置误差足够低，适当增加正则化
-                coverage_weight = 0.15  # 增加到0.15
-                diversity_weight = 0.08  # 增加到0.08
-                center_weight = 0.15  # 增加到0.15
-                point_center_weight = 0.08  # 增加到0.08
-                smoothness_weight = 0.1  # 保持0.1
-                jump_weight = 0.05  # 保持0.05
-                direction_weight = 0.02  # 保持0.02
+                # 阶段3：平衡优化，保持高平滑性权重
+                coverage_weight = 0.15  # 保持0.15
+                diversity_weight = 0.08  # 保持0.08
+                center_weight = 0.15  # 保持0.15
+                point_center_weight = 0.08  # 保持0.08
+                smoothness_weight = 0.35  # 保持高权重（从0.1提高到0.35）⚠️关键
+                jump_weight = 0.15  # 提高（从0.05提高到0.15）
+                direction_weight = 0.15  # 提高（从0.02提高到0.15）
+                acceleration_weight = 0.15  # 加速度约束
+                direction_continuity_weight = 0.15  # 方向连续性
             
             # Batch内多样性损失：只在阶段2和3使用
             if epoch <= 80:
@@ -275,6 +309,17 @@ def train():
                 (predicted_scanpaths - true_scanpaths) ** 2
             )
             
+            # 计算加速度和方向连续性权重（阶段1也需要）
+            if epoch <= 80:
+                acceleration_weight = 0.1  # 阶段1：加速度约束
+                direction_continuity_weight = 0.1  # 阶段1：方向连续性
+            elif epoch <= 150:
+                # 已在上面计算
+                pass
+            else:
+                # 已在上面计算
+                pass
+            
             loss = weighted_reconstruction_loss + beta * kl_loss + \
                    coverage_weight * coverage_loss + \
                    diversity_weight * diversity_loss + \
@@ -283,6 +328,8 @@ def train():
                    smoothness_weight * step_length_loss + \
                    jump_weight * jump_penalty + \
                    direction_weight * direction_loss + \
+                   acceleration_weight * acceleration_loss + \
+                   direction_continuity_weight * direction_continuity_loss + \
                    batch_diversity_weight * batch_diversity_loss
 
             # 反向传播
@@ -326,17 +373,19 @@ def train():
                 avg_jump = jump_penalty.item()
                 avg_batch_div = batch_diversity_loss.item()
                 avg_point_center = point_center_penalty.item()
+                avg_acceleration = acceleration_loss.item()
+                avg_dir_continuity = direction_continuity_loss.item()
                 train_bar.set_postfix({
                     'Loss': f"{avg_loss:.4f}",
                     'PosErr': f"{avg_error:.4f}",
                     'Beta': f"{beta:.4f}",
                     'Cov': f"{avg_coverage:.4f}",
-                    'Div': f"{avg_diversity:.4f}",
-                    'BDiv': f"{avg_batch_div:.4f}",
                     'Ctr': f"{avg_center:.4f}",
                     'PCtr': f"{avg_point_center:.4f}",
                     'Smooth': f"{avg_smooth:.4f}",
                     'Jump': f"{avg_jump:.4f}",
+                    'Dir': f"{avg_dir_continuity:.4f}",
+                    'Acc': f"{avg_acceleration:.4f}",
                 })
 
         # 平均训练指标
@@ -427,7 +476,7 @@ def train():
                         point_center_dist = torch.mean((predicted_scanpaths - 0.5) ** 2, dim=-1)
                         point_center_penalty = torch.mean(((0.02 - point_center_dist).clamp(min=0.0)) ** 2) * 50.0
                     
-                    # 7. 轨迹平滑性损失（与训练时一致）
+                    # 7. 轨迹平滑性损失（与训练时完全一致，包括新增的加速度和方向连续性）
                     pred_diffs = predicted_scanpaths[:, 1:] - predicted_scanpaths[:, :-1]
                     true_diffs = true_scanpaths[:, 1:] - true_scanpaths[:, :-1]
                     pred_step_lengths = torch.norm(pred_diffs, p=2, dim=-1)
@@ -435,6 +484,7 @@ def train():
                     step_length_loss = nn.functional.mse_loss(pred_step_lengths, true_step_lengths)
                     large_jumps = (pred_step_lengths - 0.20).clamp(min=0.0)
                     jump_penalty = torch.mean(large_jumps ** 2)
+                    
                     if pred_diffs.shape[1] > 1:
                         pred_directions = pred_diffs / (pred_step_lengths.unsqueeze(-1) + 1e-8)
                         true_directions = true_diffs / (true_step_lengths.unsqueeze(-1) + 1e-8)
@@ -446,6 +496,33 @@ def train():
                         )
                     else:
                         direction_loss = torch.tensor(0.0, device=predicted_scanpaths.device)
+                    
+                    # 加速度约束（与训练时一致）
+                    if pred_step_lengths.shape[1] > 1:
+                        pred_acceleration = pred_step_lengths[:, 1:] - pred_step_lengths[:, :-1]
+                        true_acceleration = true_step_lengths[:, 1:] - true_step_lengths[:, :-1]
+                        acceleration_loss = nn.functional.mse_loss(pred_acceleration, true_acceleration)
+                    else:
+                        acceleration_loss = torch.tensor(0.0, device=predicted_scanpaths.device)
+                    
+                    # 方向连续性（与训练时一致）
+                    if pred_directions.shape[1] > 0:
+                        pred_dir_similarity = F.cosine_similarity(
+                            pred_directions[:, :-1], 
+                            pred_directions[:, 1:], 
+                            dim=-1
+                        )
+                        true_dir_similarity = F.cosine_similarity(
+                            true_directions[:, :-1], 
+                            true_directions[:, 1:], 
+                            dim=-1
+                        )
+                        direction_continuity_loss = nn.functional.mse_loss(
+                            pred_dir_similarity, 
+                            true_dir_similarity
+                        )
+                    else:
+                        direction_continuity_loss = torch.tensor(0.0, device=predicted_scanpaths.device)
                     
                     # 8. Batch内多样性损失（与训练时一致，分阶段）
                     if epoch <= 80:
@@ -473,32 +550,38 @@ def train():
 
                     # 总损失（与训练时完全一致，分阶段）
                     if epoch <= 80:
-                        coverage_weight = 0.0
+                        coverage_weight = 0.05
                         diversity_weight = 0.0
-                        center_weight = 0.0
-                        point_center_weight = 0.0
-                        smoothness_weight = 0.05
-                        jump_weight = 0.02
-                        direction_weight = 0.01
+                        center_weight = 0.05
+                        point_center_weight = 0.03
+                        smoothness_weight = 0.25
+                        jump_weight = 0.1
+                        direction_weight = 0.1
+                        acceleration_weight = 0.1
+                        direction_continuity_weight = 0.1
                         batch_diversity_weight = 0.0
                     elif epoch <= 150:
                         progress = (epoch - 80) / 70.0
-                        coverage_weight = 0.1 * progress
+                        coverage_weight = 0.05 + 0.1 * progress
                         diversity_weight = 0.05 * progress
-                        center_weight = 0.1 * progress
-                        point_center_weight = 0.05 * progress
-                        smoothness_weight = 0.05 + 0.05 * progress
-                        jump_weight = 0.02 + 0.03 * progress
-                        direction_weight = 0.01 + 0.01 * progress
+                        center_weight = 0.05 + 0.1 * progress
+                        point_center_weight = 0.03 + 0.05 * progress
+                        smoothness_weight = 0.25 + 0.1 * progress
+                        jump_weight = 0.1 + 0.05 * progress
+                        direction_weight = 0.1 + 0.05 * progress
+                        acceleration_weight = 0.1 + 0.05 * progress
+                        direction_continuity_weight = 0.1 + 0.05 * progress
                         batch_diversity_weight = 0.01 * progress
                     else:
                         coverage_weight = 0.15
                         diversity_weight = 0.08
                         center_weight = 0.15
                         point_center_weight = 0.08
-                        smoothness_weight = 0.1
-                        jump_weight = 0.05
-                        direction_weight = 0.02
+                        smoothness_weight = 0.35
+                        jump_weight = 0.15
+                        direction_weight = 0.15
+                        acceleration_weight = 0.15
+                        direction_continuity_weight = 0.15
                         batch_diversity_weight = 0.01
                     
                     loss = weighted_reconstruction_loss + beta * kl_loss + \
@@ -509,6 +592,8 @@ def train():
                            smoothness_weight * step_length_loss + \
                            jump_weight * jump_penalty + \
                            direction_weight * direction_loss + \
+                           acceleration_weight * acceleration_loss + \
+                           direction_continuity_weight * direction_continuity_loss + \
                            batch_diversity_weight * batch_diversity_loss
 
                     # 计算位置误差（与训练时一致，使用加权误差，分阶段）
