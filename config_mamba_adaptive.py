@@ -53,3 +53,25 @@ class MambaAdaptiveConfig:
 
     # 验证
     val_interval = 5
+
+    # ==================== 新增配置项 ====================
+    # 第一阶段配置
+    use_wrap_around = True  # 启用360度wrap around
+    use_simplified_loss = True  # 使用简化损失函数
+    teacher_forcing_strategy = 'exponential'  # 'linear', 'exponential'
+
+    # 第二阶段配置
+    use_y_attention = True  # 启用Y方向注意力
+    y_attention_bias_scale = 0.1  # Y方向偏置缩放
+    use_simplified_feature_update = True  # 使用简化特征更新
+    feature_update_sigma = 0.2  # 空间权重的sigma
+
+    # 损失权重（简化后）
+    loss_weights = {
+        'reconstruction': 1.0,
+        'kl': 0.005,
+        'spatial_coverage': 0.5,  # 阶段1初始值
+        'trajectory_smoothness': 1.5,
+        'direction_consistency': 0.5,
+        'boundary': 0.2
+    }

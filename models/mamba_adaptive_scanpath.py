@@ -31,6 +31,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .improved_model_v5 import OptimizedSphereGlanceNet, OptimizedFocusNet, SimpleGatedFusion
+from .y_attention import YDirectionAttention
+from .feature_update_v2 import CrossAttentionFeatureUpdate
 
 try:
     from mamba_ssm import Mamba
@@ -101,25 +103,18 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             nn.LayerNorm(d_model)
         )
 
+        # ==================== Y方向注意力 ====================
+        # 鼓励Y方向多样性
+        self.y_attention = YDirectionAttention(d_model=d_model)
+
         # ==================== 特征融合 ====================
         # 门控融合：融合全局和局部特征
         self.gated_fusion = SimpleGatedFusion(dim=d_model)
 
-        # 特征更新：用局部特征更新全局特征
-        self.feature_update_conv = nn.Conv2d(
-            in_channels=d_model,
-            out_channels=d_model,
-            kernel_size=3, stride=1, padding=1,
-            groups=d_model,
-            bias=False
-        )
-        self.feature_update_norm = nn.LayerNorm(d_model)
-        self.feature_update_mlp = nn.Sequential(
-            nn.Linear(d_model, d_model * 2),
-            nn.GELU(),
-            nn.Dropout(0.2),
-            nn.Linear(d_model * 2, 1),
-            nn.Sigmoid()
+        # 特征更新：使用简化的Cross-Attention机制
+        self.feature_updater = CrossAttentionFeatureUpdate(
+            d_model=d_model,
+            feature_size=feature_size
         )
 
         # 空间注意力
@@ -219,15 +214,15 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
     def get_img_patches(self, images, positions):
         """
         根据注视点位置crop图像patch
-        
+
         关键改进：处理360图像的边界连续性
         - 360图像是等距圆柱投影（Equirectangular Projection）
         - 左右边界是连续的（x=0和x=W是同一个位置）
         - 当patch跨越左右边界时，需要wrap around处理
-        
+
         Args:
             images: 原始图像 (B, 3, H, W)，360度等距圆柱投影图像
-            positions: 归一化位置 [0, 1] (B, 2)，(x, y) = (经度归一化, 纬度归一化)
+            positions: 归一化位置 [0, 1] (B, 2)，(y, x) = (纬度归一化, 经度归一化)
         Returns:
             patches: cropped patches (B, 3, patch_size, patch_size)
             feat_grid: 用于特征更新的grid
@@ -236,58 +231,47 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
         H, W = self.image_size
         patch_size = self.focus_patch_size
 
-        # 计算patch坐标（像素坐标）
-        patch_coordinate = positions * torch.tensor([H, W], device=images.device, dtype=torch.float32)
-        patch_coordinate = patch_coordinate - patch_size / 2  # 中心对齐
+        patches_list = []
+        feat_grids_list = []
 
-        # 处理Y坐标（纬度）：clamp到有效范围
-        x_center = torch.clamp(patch_coordinate[:, 0], 0, H - patch_size)
-        
-        # 处理X坐标（经度）：考虑360图像的边界连续性
-        # 关键修复：对于360图像，x坐标应该wrap around，而不是clamp
-        y_center_raw = patch_coordinate[:, 1]
-        
-        # 检查是否需要wrap around（patch跨越左右边界）
-        # 如果patch的左边界 < 0 或右边界 > W，需要wrap around
-        y_left = y_center_raw
-        y_right = y_center_raw + patch_size
-        
-        # 判断是否需要wrap around
-        needs_wrap_left = y_left < 0
-        needs_wrap_right = y_right > W
-        
-        # 对于需要wrap around的情况，使用模运算
-        # 但grid_sample不支持wrap around，所以我们需要手动处理
-        # 方案：如果patch跨越边界，先扩展图像（左右各复制一部分），然后crop
-        
-        # 简化方案：对于跨越边界的情况，使用clamp（虽然不完美，但实现简单）
-        # 更好的方案是使用torch.roll或手动拼接，但会增加复杂度
-        # 这里先使用clamp，后续可以改进
-        y_center = torch.clamp(y_center_raw, 0, W - patch_size)
-        
-        x1, x2 = x_center, x_center + patch_size
-        y1, y2 = y_center, y_center + patch_size
+        for i in range(B):
+            # 计算patch中心坐标（像素）
+            # positions: (y, x) where y is latitude [0,1], x is longitude [0,1]
+            y_center = positions[i, 0] * H - patch_size / 2  # Y坐标（纬度）
+            x_center = positions[i, 1] * W - patch_size / 2  # X坐标（经度）
 
-        # 构建仿射变换矩阵
-        theta = torch.zeros((B, 2, 3), device=images.device)
-        theta[:, 0, 0] = patch_size / W
-        theta[:, 1, 1] = patch_size / H
-        theta[:, 0, 2] = -1 + (y1 + y2) / W
-        theta[:, 1, 2] = -1 + (x1 + x2) / H
+            # Y坐标clamp（纬度不是周期性的）
+            y_start = int(torch.clamp(torch.tensor(y_center), 0, H - patch_size).item())
 
-        # 生成grid并采样
-        grid = F.affine_grid(theta.float(), torch.Size((B, 3, patch_size, patch_size)), align_corners=False)
-        
-        # 改进：对于跨越边界的情况，使用wrap模式采样
-        # 但PyTorch的grid_sample不支持wrap模式，所以我们需要手动处理
-        # 临时方案：使用clamp模式，但记录是否需要wrap around（用于后续改进）
-        patches = F.grid_sample(images, grid, mode='bilinear', align_corners=False)
+            # X坐标wrap around（经度是周期性的）
+            x_start = int(x_center) % W
 
-        # 生成特征更新用的grid
-        feat_grid = F.affine_grid(theta.float(), torch.Size((B, 1, self.feature_size, self.feature_size)),
-                                  align_corners=False)
+            # 提取patch
+            if x_start + patch_size <= W:
+                # 不跨越边界
+                patch = images[i:i+1, :, y_start:y_start+patch_size, x_start:x_start+patch_size]
+            else:
+                # 跨越右边界，需要wrap around
+                right_part = images[i:i+1, :, y_start:y_start+patch_size, x_start:]
+                left_part = images[i:i+1, :, y_start:y_start+patch_size, :(x_start+patch_size-W)]
+                patch = torch.cat([right_part, left_part], dim=3)
 
-        return patches, feat_grid
+            patches_list.append(patch)
+
+            # 生成feat_grid（用于特征更新）
+            theta = torch.zeros((1, 2, 3), device=images.device)
+            theta[:, 0, 0] = patch_size / W
+            theta[:, 1, 1] = patch_size / H
+            theta[:, 0, 2] = -1 + (x_start + x_start + patch_size) / W
+            theta[:, 1, 2] = -1 + (y_start + y_start + patch_size) / H
+            feat_grid = F.affine_grid(theta, torch.Size((1, 1, self.feature_size, self.feature_size)),
+                                       align_corners=False)
+            feat_grids_list.append(feat_grid)
+
+        patches = torch.cat(patches_list, dim=0)
+        feat_grids = torch.cat(feat_grids_list, dim=0)
+
+        return patches, feat_grids
 
     def update_global_features(self, global_features, local_features, feat_grid):
         """
@@ -437,9 +421,9 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             # 2. Focus网络提取局部高分辨率特征
             local_features = self.focus_net(patches)  # (B, L, C)，其中L=feature_size*feature_size=196
 
-            # 3. 更新全局特征
-            updated_features = self.update_global_features(
-                updated_features, local_features, feat_grid
+            # 3. 更新全局特征（使用简化的Cross-Attention机制）
+            updated_features = self.feature_updater(
+                updated_features, local_features, prev_pos
             )
 
             # 4. 融合全局和局部特征（改进：使用更强大的融合）
@@ -553,7 +537,19 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             z_with_pos = torch.cat([z, prev_pos, history_pos], dim=-1)  # (B, d_model//2+4)
             pos_t = self.position_decoder(z_with_pos)  # (B, 2), 范围[-1, 1]
             pos_t = (pos_t + 1.0) / 2.0  # 归一化到[0, 1]
-            
+
+            # ==================== Y方向注意力偏置 ====================
+            # 在位置预测后，添加Y方向偏置以增加Y方向多样性
+            if t > 0 and hasattr(self, 'y_attention'):
+                # 收集历史Y位置
+                history_y = torch.stack([p[:, 1] for p in positions[-min(5, t):]], dim=1)  # (B, T)
+
+                # 计算Y方向偏置
+                y_bias = self.y_attention(combined_features, history_y)  # (B, 1)
+
+                # 添加偏置到Y坐标
+                pos_t[:, 1] = pos_t[:, 1] + 0.1 * y_bias.squeeze(1)
+
             # 改进：处理360图像的边界连续性
             # 关键修复：对于360图像，x坐标（经度）应该wrap around，而不是clamp
             # y坐标（纬度）：clamp到有效范围（不是周期性的）
