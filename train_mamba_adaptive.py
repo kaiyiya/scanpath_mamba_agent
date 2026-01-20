@@ -128,48 +128,48 @@ def train():
             # 策略：使用较小的beta值，让重构损失占主导
             beta = min(0.01, 0.005 * (1.01 ** (epoch - 1)))  # 从0.005开始，最多到0.01
 
-            # 4. 覆盖范围损失：鼓励预测路径覆盖整个图像，防止集中在中心
+            # 4. 覆盖范围损失：鼓励预测路径覆盖整个图像，防止过度聚集
             # 计算预测路径的覆盖范围（x和y方向分别计算）
             pred_min = predicted_scanpaths.min(dim=1)[0]  # (B, 2)
             pred_max = predicted_scanpaths.max(dim=1)[0]  # (B, 2)
             pred_range = pred_max - pred_min  # (B, 2)
-            # 理想覆盖范围应该是接近[1.0, 1.0]，惩罚小范围
-            # 改进：使用更敏感的惩罚，提高阈值到0.5，并增加惩罚强度
-            coverage_loss = torch.mean(((0.5 - pred_range).clamp(min=0.0)) ** 2) * 2.0  # 增加2倍惩罚
+            # 改进：使用更温和的惩罚，只在覆盖范围非常小时才惩罚
+            # 阈值降低到0.3，惩罚强度降低，避免过度约束
+            coverage_loss = torch.mean(((0.3 - pred_range).clamp(min=0.0)) ** 2) * 0.5  # 降低惩罚强度
             
             # 5. 位置多样性损失：鼓励预测位置具有足够的方差
             pred_mean = predicted_scanpaths.mean(dim=1)  # (B, 2)
             pred_var = ((predicted_scanpaths - pred_mean.unsqueeze(1)) ** 2).mean(dim=1)  # (B, 2)
-            # 改进：提高方差阈值到0.03（从0.02），对应标准差约0.17，增加惩罚强度
-            min_var = 0.03  # 期望最小方差（对应标准差约0.17）
-            diversity_loss = torch.mean(((min_var - pred_var).clamp(min=0.0)) ** 2) * 3.0  # 增加3倍惩罚
+            # 改进：降低方差阈值和惩罚强度，避免过度约束
+            min_var = 0.015  # 期望最小方差（对应标准差约0.12），降低阈值
+            diversity_loss = torch.mean(((min_var - pred_var).clamp(min=0.0)) ** 2) * 0.5  # 大幅降低惩罚强度
             
-            # 6. 中心聚集惩罚：惩罚预测均值过于接近图像中心(0.5, 0.5)
-            # 问题：360度全景图路径集中在中心区域，需要强制分散
-            # 计算每个样本的均值距离中心的距离
+            # 6. 边界约束：防止预测跑到图像边界外（这是关键改进！）
+            # 问题：预测路径跑到边缘（x=0.9+, y=0.9+），需要约束在合理范围内
+            # 定义合理范围：[0.05, 0.95]，避免边界效应
+            boundary_min = 0.05
+            boundary_max = 0.95
+            
+            # 惩罚超出边界的位置
+            below_boundary = (predicted_scanpaths < boundary_min).float()
+            above_boundary = (predicted_scanpaths > boundary_max).float()
+            boundary_penalty = torch.mean(
+                below_boundary * (boundary_min - predicted_scanpaths) ** 2 +
+                above_boundary * (predicted_scanpaths - boundary_max) ** 2
+            ) * 10.0  # 强惩罚边界外的点
+            
+            # 7. 温和的中心聚集惩罚：只在非常接近中心时才轻微惩罚
+            # 改进：大幅降低惩罚强度和阈值，避免过度约束
             mean_center_dist = torch.mean((pred_mean - 0.5) ** 2, dim=-1)  # (B,)
             
-            # 改进的惩罚策略：更严格的惩罚
-            # 1. 当距离<0.03时（均值在[0.43, 0.57]），给予强惩罚
-            # 2. 当距离<0.06时（均值在[0.4, 0.6]），给予中等惩罚
-            # 3. 当距离>=0.06时，不给惩罚
-            close_to_center = (mean_center_dist < 0.03).float()
-            medium_distance = ((mean_center_dist >= 0.03) & (mean_center_dist < 0.06)).float()
+            # 只在非常接近中心时（距离<0.01，即均值在[0.4, 0.6]）才轻微惩罚
+            very_close_to_center = (mean_center_dist < 0.01).float()
+            center_penalty = torch.mean(very_close_to_center * (0.01 - mean_center_dist) * 5.0)  # 大幅降低惩罚
             
-            # 强惩罚：距离中心很近的点（增加惩罚强度）
-            strong_penalty = torch.mean(close_to_center * (0.03 - mean_center_dist) * 200.0)  # 从100提高到200
-            # 中等惩罚：距离中心较近的点（增加惩罚强度）
-            medium_penalty = torch.mean(medium_distance * (0.06 - mean_center_dist) * 50.0)  # 从20提高到50
-            
-            center_penalty = strong_penalty + medium_penalty
-            
-            # 额外的中心聚集惩罚：直接惩罚预测点集中在中心区域
-            # 计算所有预测点到中心的平均距离
-            point_center_dist = torch.mean((predicted_scanpaths - 0.5) ** 2, dim=-1)  # (B, seq_len)
-            # 改进：提高阈值到0.03，增加惩罚强度
-            point_center_penalty = torch.mean(((0.03 - point_center_dist).clamp(min=0.0)) ** 2) * 100.0  # 从50提高到100
+            # 移除点中心惩罚，避免过度约束
+            point_center_penalty = torch.tensor(0.0, device=predicted_scanpaths.device)
 
-            # 7. 轨迹平滑性损失：鼓励相邻点之间的距离合理，使路径连贯流畅
+            # 8. 轨迹平滑性损失：鼓励相邻点之间的距离合理，使路径连贯流畅
             # 计算相邻点之间的步长
             pred_diffs = predicted_scanpaths[:, 1:] - predicted_scanpaths[:, :-1]  # (B, seq_len-1, 2)
             true_diffs = true_scanpaths[:, 1:] - true_scanpaths[:, :-1]  # (B, seq_len-1, 2)
@@ -241,51 +241,54 @@ def train():
             # 阶段3 (Epoch 151+): 如果位置误差足够低，适当增加正则化
             
             if epoch <= 80:
-                # 阶段1：重构损失占主导，但必须保证路径平滑性和合理性
-                # 改进：增强分散性约束，防止路径聚集在中心
-                coverage_weight = 0.15  # 提高覆盖范围约束（从0.05提高到0.15）⚠️关键
-                diversity_weight = 0.1  # 加入多样性惩罚（从0提高到0.1）⚠️关键
-                center_weight = 0.2  # 增强中心聚集惩罚（从0.05提高到0.2）⚠️关键
-                point_center_weight = 0.15  # 增强点中心惩罚（从0.03提高到0.15）⚠️关键
-                smoothness_weight = 0.25  # 保持平滑性权重
-                jump_weight = 0.1  # 保持跳跃惩罚
-                direction_weight = 0.1  # 保持方向一致性
+                # 阶段1：重构损失占主导，只加入必要的约束
+                # 改进：大幅降低正则化权重，优先保证位置精度
+                coverage_weight = 0.02  # 大幅降低（从0.15降到0.02）
+                diversity_weight = 0.01  # 大幅降低（从0.1降到0.01）
+                center_weight = 0.01  # 大幅降低（从0.2降到0.01）
+                boundary_weight = 0.5  # 边界约束：强约束，防止跑到边界外
+                point_center_weight = 0.0  # 移除点中心惩罚
+                smoothness_weight = 0.15  # 保持平滑性权重
+                jump_weight = 0.05  # 降低跳跃惩罚
+                direction_weight = 0.05  # 降低方向一致性
             elif epoch <= 150:
-                # 阶段2：逐渐增加正则化，保持高平滑性权重
+                # 阶段2：逐渐增加正则化，但保持温和
                 progress = (epoch - 80) / 70.0  # 0.0 -> 1.0
-                coverage_weight = 0.05 + 0.1 * progress  # 从0.05逐渐增加到0.15
-                diversity_weight = 0.05 * progress  # 逐渐从0增加到0.05
-                center_weight = 0.05 + 0.1 * progress  # 从0.05逐渐增加到0.15
-                point_center_weight = 0.03 + 0.05 * progress  # 从0.03逐渐增加到0.08
-                smoothness_weight = 0.25 + 0.1 * progress  # 从0.25增加到0.35（保持高权重）
-                jump_weight = 0.1 + 0.05 * progress  # 从0.1增加到0.15
-                direction_weight = 0.1 + 0.05 * progress  # 从0.1增加到0.15
-                acceleration_weight = 0.1 + 0.05 * progress  # 加速度约束：从0.1增加到0.15
-                direction_continuity_weight = 0.1 + 0.05 * progress  # 方向连续性：从0.1增加到0.15
+                coverage_weight = 0.02 + 0.03 * progress  # 从0.02逐渐增加到0.05
+                diversity_weight = 0.01 + 0.02 * progress  # 从0.01逐渐增加到0.03
+                center_weight = 0.01 + 0.02 * progress  # 从0.01逐渐增加到0.03
+                boundary_weight = 0.5 - 0.2 * progress  # 从0.5逐渐降低到0.3（边界约束逐渐放松）
+                point_center_weight = 0.0  # 保持为0
+                smoothness_weight = 0.15 + 0.1 * progress  # 从0.15增加到0.25
+                jump_weight = 0.05 + 0.05 * progress  # 从0.05增加到0.1
+                direction_weight = 0.05 + 0.05 * progress  # 从0.05增加到0.1
+                acceleration_weight = 0.05 + 0.05 * progress  # 加速度约束：从0.05增加到0.1
+                direction_continuity_weight = 0.05 + 0.05 * progress  # 方向连续性：从0.05增加到0.1
             else:
-                # 阶段3：平衡优化，保持高平滑性权重
-                coverage_weight = 0.15  # 保持0.15
-                diversity_weight = 0.08  # 保持0.08
-                center_weight = 0.15  # 保持0.15
-                point_center_weight = 0.08  # 保持0.08
-                smoothness_weight = 0.35  # 保持高权重（从0.1提高到0.35）⚠️关键
-                jump_weight = 0.15  # 提高（从0.05提高到0.15）
-                direction_weight = 0.15  # 提高（从0.02提高到0.15）
-                acceleration_weight = 0.15  # 加速度约束
-                direction_continuity_weight = 0.15  # 方向连续性
+                # 阶段3：平衡优化，保持温和的正则化
+                coverage_weight = 0.05  # 保持0.05（从0.15降低）
+                diversity_weight = 0.03  # 保持0.03（从0.08降低）
+                center_weight = 0.03  # 保持0.03（从0.15降低）
+                boundary_weight = 0.3  # 边界约束：保持0.3
+                point_center_weight = 0.0  # 保持为0
+                smoothness_weight = 0.25  # 保持0.25（从0.35降低）
+                jump_weight = 0.1  # 保持0.1（从0.15降低）
+                direction_weight = 0.1  # 保持0.1（从0.15降低）
+                acceleration_weight = 0.1  # 加速度约束
+                direction_continuity_weight = 0.1  # 方向连续性
             
-            # Batch内多样性损失：改进：阶段1也使用，但权重较小
+            # Batch内多样性损失：移除或大幅降低权重
             batch_mean = predicted_scanpaths.mean(dim=0, keepdim=True)  # (1, seq_len, 2)
             batch_diversity = torch.mean((predicted_scanpaths - batch_mean) ** 2)  # 标量
-            min_batch_diversity = 0.015  # 提高阈值（从0.01到0.015）
+            min_batch_diversity = 0.01  # 降低阈值
             batch_diversity_loss = torch.mean(((min_batch_diversity - batch_diversity).clamp(min=0.0)) ** 2)
             if epoch <= 80:
-                batch_diversity_weight = 0.05  # 阶段1也使用，权重0.05
+                batch_diversity_weight = 0.0  # 阶段1不使用
             elif epoch <= 150:
                 progress = (epoch - 80) / 70.0
-                batch_diversity_weight = 0.05 + 0.05 * progress  # 从0.05逐渐增加到0.1
+                batch_diversity_weight = 0.01 * progress  # 从0逐渐增加到0.01
             else:
-                batch_diversity_weight = 0.1  # 阶段3保持0.1
+                batch_diversity_weight = 0.01  # 阶段3保持0.01（大幅降低）
             
             # 使用加权MSE：对起始位置和前几步给予更高权重
             # 修改：降低权重，避免过度关注前几步而忽略后续步骤
@@ -321,6 +324,7 @@ def train():
                    coverage_weight * coverage_loss + \
                    diversity_weight * diversity_loss + \
                    center_weight * center_penalty + \
+                   boundary_weight * boundary_penalty + \
                    point_center_weight * point_center_penalty + \
                    smoothness_weight * step_length_loss + \
                    jump_weight * jump_penalty + \
@@ -439,26 +443,31 @@ def train():
                     pred_min = predicted_scanpaths.min(dim=1)[0]
                     pred_max = predicted_scanpaths.max(dim=1)[0]
                     pred_range = pred_max - pred_min
-                    coverage_loss = torch.mean(((0.5 - pred_range).clamp(min=0.0)) ** 2) * 2.0
+                    coverage_loss = torch.mean(((0.3 - pred_range).clamp(min=0.0)) ** 2) * 0.5
                     
                     # 5. 位置多样性损失（与训练时一致，使用改进后的版本）
                     pred_mean = predicted_scanpaths.mean(dim=1)
                     pred_var = ((predicted_scanpaths - pred_mean.unsqueeze(1)) ** 2).mean(dim=1)
-                    min_var = 0.03
-                    diversity_loss = torch.mean(((min_var - pred_var).clamp(min=0.0)) ** 2) * 3.0
+                    min_var = 0.015
+                    diversity_loss = torch.mean(((min_var - pred_var).clamp(min=0.0)) ** 2) * 0.5
                     
-                    # 6. 中心聚集惩罚（与训练时完全一致，使用改进后的版本）
+                    # 6. 边界约束（与训练时一致）
+                    boundary_min = 0.05
+                    boundary_max = 0.95
+                    below_boundary = (predicted_scanpaths < boundary_min).float()
+                    above_boundary = (predicted_scanpaths > boundary_max).float()
+                    boundary_penalty = torch.mean(
+                        below_boundary * (boundary_min - predicted_scanpaths) ** 2 +
+                        above_boundary * (predicted_scanpaths - boundary_max) ** 2
+                    ) * 10.0
+                    
+                    # 7. 温和的中心聚集惩罚（与训练时一致）
                     mean_center_dist = torch.mean((pred_mean - 0.5) ** 2, dim=-1)
-                    close_to_center = (mean_center_dist < 0.03).float()
-                    medium_distance = ((mean_center_dist >= 0.03) & (mean_center_dist < 0.06)).float()
-                    strong_penalty = torch.mean(close_to_center * (0.03 - mean_center_dist) * 200.0)
-                    medium_penalty = torch.mean(medium_distance * (0.06 - mean_center_dist) * 50.0)
-                    center_penalty = strong_penalty + medium_penalty
+                    very_close_to_center = (mean_center_dist < 0.01).float()
+                    center_penalty = torch.mean(very_close_to_center * (0.01 - mean_center_dist) * 5.0)
+                    point_center_penalty = torch.tensor(0.0, device=predicted_scanpaths.device)
                     
-                    point_center_dist = torch.mean((predicted_scanpaths - 0.5) ** 2, dim=-1)
-                    point_center_penalty = torch.mean(((0.03 - point_center_dist).clamp(min=0.0)) ** 2) * 100.0
-                    
-                    # 7. 轨迹平滑性损失（与训练时完全一致，包括新增的加速度和方向连续性）
+                    # 8. 轨迹平滑性损失（与训练时完全一致，包括新增的加速度和方向连续性）
                     pred_diffs = predicted_scanpaths[:, 1:] - predicted_scanpaths[:, :-1]
                     true_diffs = true_scanpaths[:, 1:] - true_scanpaths[:, :-1]
                     pred_step_lengths = torch.norm(pred_diffs, p=2, dim=-1)
@@ -506,10 +515,10 @@ def train():
                     else:
                         direction_continuity_loss = torch.tensor(0.0, device=predicted_scanpaths.device)
                     
-                    # 8. Batch内多样性损失（与训练时一致，使用改进后的版本）
+                    # 9. Batch内多样性损失（与训练时一致，使用改进后的版本）
                     batch_mean = predicted_scanpaths.mean(dim=0, keepdim=True)
                     batch_diversity = torch.mean((predicted_scanpaths - batch_mean) ** 2)
-                    min_batch_diversity = 0.015
+                    min_batch_diversity = 0.01
                     batch_diversity_loss = torch.mean(((min_batch_diversity - batch_diversity).clamp(min=0.0)) ** 2)
                     
                     # 9. 加权MSE损失（与训练时一致，分阶段）
@@ -529,44 +538,48 @@ def train():
 
                     # 总损失（与训练时完全一致，使用改进后的版本）
                     if epoch <= 80:
-                        coverage_weight = 0.15
-                        diversity_weight = 0.1
-                        center_weight = 0.2
-                        point_center_weight = 0.15
+                        coverage_weight = 0.02
+                        diversity_weight = 0.01
+                        center_weight = 0.01
+                        boundary_weight = 0.5
+                        point_center_weight = 0.0
+                        smoothness_weight = 0.15
+                        jump_weight = 0.05
+                        direction_weight = 0.05
+                        acceleration_weight = 0.05
+                        direction_continuity_weight = 0.05
+                        batch_diversity_weight = 0.0
+                    elif epoch <= 150:
+                        progress = (epoch - 80) / 70.0
+                        coverage_weight = 0.02 + 0.03 * progress  # 从0.02增加到0.05
+                        diversity_weight = 0.01 + 0.02 * progress  # 从0.01增加到0.03
+                        center_weight = 0.01 + 0.02 * progress  # 从0.01增加到0.03
+                        boundary_weight = 0.5 - 0.2 * progress  # 从0.5降低到0.3
+                        point_center_weight = 0.0
+                        smoothness_weight = 0.15 + 0.1 * progress
+                        jump_weight = 0.05 + 0.05 * progress
+                        direction_weight = 0.05 + 0.05 * progress
+                        acceleration_weight = 0.05 + 0.05 * progress
+                        direction_continuity_weight = 0.05 + 0.05 * progress
+                        batch_diversity_weight = 0.01 * progress  # 从0增加到0.01
+                    else:
+                        coverage_weight = 0.05
+                        diversity_weight = 0.03
+                        center_weight = 0.03
+                        boundary_weight = 0.3
+                        point_center_weight = 0.0
                         smoothness_weight = 0.25
                         jump_weight = 0.1
                         direction_weight = 0.1
                         acceleration_weight = 0.1
                         direction_continuity_weight = 0.1
-                        batch_diversity_weight = 0.05
-                    elif epoch <= 150:
-                        progress = (epoch - 80) / 70.0
-                        coverage_weight = 0.15 + 0.05 * progress  # 从0.15增加到0.2
-                        diversity_weight = 0.1 + 0.05 * progress  # 从0.1增加到0.15
-                        center_weight = 0.2 + 0.05 * progress  # 从0.2增加到0.25
-                        point_center_weight = 0.15 + 0.05 * progress  # 从0.15增加到0.2
-                        smoothness_weight = 0.25 + 0.1 * progress
-                        jump_weight = 0.1 + 0.05 * progress
-                        direction_weight = 0.1 + 0.05 * progress
-                        acceleration_weight = 0.1 + 0.05 * progress
-                        direction_continuity_weight = 0.1 + 0.05 * progress
-                        batch_diversity_weight = 0.05 + 0.05 * progress  # 从0.05增加到0.1
-                    else:
-                        coverage_weight = 0.2
-                        diversity_weight = 0.15
-                        center_weight = 0.25
-                        point_center_weight = 0.2
-                        smoothness_weight = 0.35
-                        jump_weight = 0.15
-                        direction_weight = 0.15
-                        acceleration_weight = 0.15
-                        direction_continuity_weight = 0.15
-                        batch_diversity_weight = 0.1
+                        batch_diversity_weight = 0.01
                     
                     loss = weighted_reconstruction_loss + beta * kl_loss + \
                            coverage_weight * coverage_loss + \
                            diversity_weight * diversity_loss + \
                            center_weight * center_penalty + \
+                           boundary_weight * boundary_penalty + \
                            point_center_weight * point_center_penalty + \
                            smoothness_weight * step_length_loss + \
                            jump_weight * jump_penalty + \
