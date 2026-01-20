@@ -50,10 +50,12 @@ def train():
         eta_min=config.learning_rate * 0.01  # 最小学习率为初始的1%
     )
 
-    # 早停机制
-    best_val_loss = float('inf')
+    # 早停机制：基于验证位置误差而不是损失
+    # 改进：使用位置误差作为早停指标，更符合主要目标
+    best_val_position_error = float('inf')
     patience_counter = 0
-    early_stopping_patience = 15
+    early_stopping_patience = 20  # 增加到20，给模型更多机会
+    best_val_loss = float('inf')  # 仍然记录，但用于保存模型
 
     # 训练日志
     training_log = {
@@ -89,13 +91,19 @@ def train():
             true_scanpaths = batch['scanpath'].to(config.device)
 
             # 前向传播 - 传递真实位置用于Teacher Forcing
-            # 改进Teacher Forcing策略：更缓慢衰减，保持训练和推理分布一致性
-            # 训练目标：确保模型既能学习真实路径，又能在推理时独立工作
-            # 策略：前100个epoch保持0.7，然后缓慢降到0.5并保持
-            if epoch <= 100:
-                teacher_forcing_ratio = 0.7
+            # 改进Teacher Forcing策略：分阶段调整，与训练阶段对齐
+            # 阶段1: 保持高Teacher Forcing，让模型充分学习真实路径
+            # 阶段2: 逐渐降低，让模型更多依赖自身预测
+            # 阶段3: 进一步降低，但保持一定比例避免分布不匹配
+            if epoch <= 80:
+                teacher_forcing_ratio = 0.8  # 阶段1：高Teacher Forcing（提高！）
+            elif epoch <= 150:
+                # 阶段2：从0.8逐渐降到0.6
+                progress = (epoch - 80) / 70.0
+                teacher_forcing_ratio = 0.8 - 0.2 * progress
             else:
-                teacher_forcing_ratio = max(0.5, 0.7 - (epoch - 100) * 0.002)  # 每epoch降0.002
+                # 阶段3：保持0.6，避免训练和推理分布差异过大
+                teacher_forcing_ratio = 0.6
 
             # 训练时显式设置enable_early_stop=False，确保返回3个值
             predicted_scanpaths, mus, logvars = model(
@@ -196,38 +204,72 @@ def train():
             else:
                 direction_loss = torch.tensor(0.0, device=predicted_scanpaths.device)
 
-            # ========== 训练目标明确：位置预测精度优先，但必须避免中心聚集 ==========
-            # 主要目标：最小化位置误差（重构损失占主导）
-            # 关键约束：路径必须分散，不能集中在中心（360度全景图的关键要求）
-            # 次要目标：保持路径合理性（平滑性等）
+            # ========== 分阶段训练策略：位置精度优先 ==========
+            # 核心问题：正则化权重过高导致Epoch 80后位置误差突然上升
+            # 解决方案：分阶段训练，先优化位置精度，再考虑分散性
             
-            # 正则化权重策略：平衡位置精度和路径分散性
-            # 问题：之前降低权重导致路径集中在中心区域，需要提高中心聚集和覆盖范围权重
+            # 阶段1 (Epoch 1-80): 只优化位置精度，不加入强正则化
+            # 阶段2 (Epoch 81-150): 逐渐加入轻微正则化，但权重很小
+            # 阶段3 (Epoch 151+): 如果位置误差足够低，适当增加正则化
             
-            # 动态权重：早期更关注分散性，后期平衡精度和分散性
-            epoch_factor = min(1.0, epoch / 100.0)  # 前100个epoch逐渐调整
+            if epoch <= 80:
+                # 阶段1：重构损失占绝对主导（90%以上），只保留轻微平滑性约束
+                coverage_weight = 0.0  # 不加入覆盖范围惩罚
+                diversity_weight = 0.0  # 不加入多样性惩罚
+                center_weight = 0.0  # 不加入中心聚集惩罚
+                point_center_weight = 0.0  # 不加入点中心惩罚
+                smoothness_weight = 0.05  # 保留轻微平滑性（5%）
+                jump_weight = 0.02  # 保留轻微跳跃惩罚（2%）
+                direction_weight = 0.01  # 保留轻微方向一致性（1%）
+            elif epoch <= 150:
+                # 阶段2：逐渐加入轻微正则化
+                progress = (epoch - 80) / 70.0  # 0.0 -> 1.0
+                coverage_weight = 0.1 * progress  # 逐渐从0增加到0.1
+                diversity_weight = 0.05 * progress  # 逐渐从0增加到0.05
+                center_weight = 0.1 * progress  # 逐渐从0增加到0.1
+                point_center_weight = 0.05 * progress  # 逐渐从0增加到0.05
+                smoothness_weight = 0.05 + 0.05 * progress  # 从0.05增加到0.1
+                jump_weight = 0.02 + 0.03 * progress  # 从0.02增加到0.05
+                direction_weight = 0.01 + 0.01 * progress  # 从0.01增加到0.02
+            else:
+                # 阶段3：如果位置误差足够低，适当增加正则化
+                coverage_weight = 0.15  # 增加到0.15
+                diversity_weight = 0.08  # 增加到0.08
+                center_weight = 0.15  # 增加到0.15
+                point_center_weight = 0.08  # 增加到0.08
+                smoothness_weight = 0.1  # 保持0.1
+                jump_weight = 0.05  # 保持0.05
+                direction_weight = 0.02  # 保持0.02
             
-            # 调整正则化权重：提高覆盖范围和中心聚集惩罚权重（解决中心聚集问题）
-            coverage_weight = 0.5 + 0.3 * (1.0 - epoch_factor)  # 覆盖范围：0.8 -> 0.5（提高！）
-            diversity_weight = 0.1 * (1.0 - 0.3 * epoch_factor)  # 多样性：0.1 -> 0.07（保持较小）
-            center_weight = 0.8 + 0.4 * (1.0 - epoch_factor)  # 中心聚集：1.2 -> 0.8（大幅提高！）⚠️关键
-            point_center_weight = 0.5 + 0.3 * (1.0 - epoch_factor)  # 点中心惩罚：0.8 -> 0.5（新增）
-            smoothness_weight = 0.1 * (1.0 - 0.3 * epoch_factor)  # 平滑性：0.1 -> 0.07
-            jump_weight = 0.05  # 跳跃惩罚：保持0.05
-            direction_weight = 0.02  # 方向一致性：降低到0.02
-            
-            # Batch内多样性损失：降低权重
-            batch_mean = predicted_scanpaths.mean(dim=0, keepdim=True)  # (1, seq_len, 2)
-            batch_diversity = torch.mean((predicted_scanpaths - batch_mean) ** 2)  # 标量
-            min_batch_diversity = 0.01
-            batch_diversity_loss = torch.mean(((min_batch_diversity - batch_diversity).clamp(min=0.0)) ** 2)
-            batch_diversity_weight = 0.01 * (1.0 - 0.5 * epoch_factor)  # Batch多样性：0.01 -> 0.005
+            # Batch内多样性损失：只在阶段2和3使用
+            if epoch <= 80:
+                batch_diversity_loss = torch.tensor(0.0, device=predicted_scanpaths.device)
+                batch_diversity_weight = 0.0
+            else:
+                batch_mean = predicted_scanpaths.mean(dim=0, keepdim=True)  # (1, seq_len, 2)
+                batch_diversity = torch.mean((predicted_scanpaths - batch_mean) ** 2)  # 标量
+                min_batch_diversity = 0.01
+                batch_diversity_loss = torch.mean(((min_batch_diversity - batch_diversity).clamp(min=0.0)) ** 2)
+                if epoch <= 150:
+                    progress = (epoch - 80) / 70.0
+                    batch_diversity_weight = 0.01 * progress  # 从0逐渐增加到0.01
+                else:
+                    batch_diversity_weight = 0.01
             
             # 使用加权MSE：对起始位置和前几步给予更高权重
+            # 修改：降低权重，避免过度关注前几步而忽略后续步骤
             position_weights = torch.ones(config.seq_len, device=predicted_scanpaths.device)
-            position_weights[0] = 5.0  # 起始位置权重5倍（最重要）
-            position_weights[1:5] = 3.0  # 前5步权重3倍
-            position_weights[5:10] = 2.0  # 5-10步权重2倍
+            if epoch <= 80:
+                # 阶段1：适度权重，平衡前后步骤
+                position_weights[0] = 3.0  # 起始位置权重3倍（降低从5.0）
+                position_weights[1:5] = 2.0  # 前5步权重2倍（降低从3.0）
+                position_weights[5:10] = 1.5  # 5-10步权重1.5倍（降低从2.0）
+            else:
+                # 阶段2和3：进一步降低权重，更平衡
+                position_weights[0] = 2.0  # 起始位置权重2倍
+                position_weights[1:5] = 1.5  # 前5步权重1.5倍
+                position_weights[5:10] = 1.2  # 5-10步权重1.2倍
+            
             weighted_reconstruction_loss = torch.mean(
                 position_weights.unsqueeze(0).unsqueeze(-1) * 
                 (predicted_scanpaths - true_scanpaths) ** 2
@@ -251,10 +293,16 @@ def train():
 
             # 计算位置误差 - 使用加权误差（与损失函数一致，更准确地反映模型性能）
             # 训练目标：位置误差应该与损失函数同步改善
+            # 权重与损失函数中的position_weights保持一致
             position_weights_error = torch.ones(config.seq_len, device=predicted_scanpaths.device)
-            position_weights_error[0] = 5.0  # 起始位置权重5倍
-            position_weights_error[1:5] = 3.0  # 前5步权重3倍
-            position_weights_error[5:10] = 2.0  # 5-10步权重2倍
+            if epoch <= 80:
+                position_weights_error[0] = 3.0  # 与损失函数一致
+                position_weights_error[1:5] = 2.0
+                position_weights_error[5:10] = 1.5
+            else:
+                position_weights_error[0] = 2.0
+                position_weights_error[1:5] = 1.5
+                position_weights_error[5:10] = 1.2
             
             # 加权位置误差
             weighted_errors = torch.norm(
@@ -316,9 +364,14 @@ def train():
 
                     # 前向传播 - 验证模式
                     # 训练目标：验证模型在推理时的真实性能
-                    # 策略：使用少量Teacher Forcing（0.1）避免训练和推理分布差异过大
+                    # 策略：与训练阶段对齐的Teacher Forcing，避免分布差异过大
                     # 显式设置enable_early_stop=False，确保返回3个值
-                    val_teacher_forcing = 0.1  # 验证时使用少量teacher forcing
+                    if epoch <= 80:
+                        val_teacher_forcing = 0.3  # 阶段1：较高Teacher Forcing
+                    elif epoch <= 150:
+                        val_teacher_forcing = 0.2  # 阶段2：中等Teacher Forcing
+                    else:
+                        val_teacher_forcing = 0.1  # 阶段3：较低Teacher Forcing
                     result = model(images, gt_scanpaths=true_scanpaths, teacher_forcing_ratio=val_teacher_forcing, enable_early_stop=False)
                     # 安全解包：无论返回3个还是5个值，都只取前3个
                     predicted_scanpaths = result[0]
@@ -348,17 +401,31 @@ def train():
                     min_var = 0.02
                     diversity_loss = torch.mean(((min_var - pred_var).clamp(min=0.0)) ** 2)
                     
-                    # 6. 中心聚集惩罚（与训练时一致）
-                    mean_center_dist = torch.mean((pred_mean - 0.5) ** 2, dim=-1)
-                    close_to_center = (mean_center_dist < 0.02).float()
-                    medium_distance = ((mean_center_dist >= 0.02) & (mean_center_dist < 0.05)).float()
-                    strong_penalty = torch.mean(close_to_center * (0.02 - mean_center_dist) * 100.0)
-                    medium_penalty = torch.mean(medium_distance * (0.05 - mean_center_dist) * 20.0)
-                    center_penalty = strong_penalty + medium_penalty
-                    
-                    # 额外的点中心惩罚
-                    point_center_dist = torch.mean((predicted_scanpaths - 0.5) ** 2, dim=-1)
-                    point_center_penalty = torch.mean(((0.02 - point_center_dist).clamp(min=0.0)) ** 2) * 50.0
+                    # 6. 中心聚集惩罚（与训练时完全一致，分阶段）
+                    if epoch <= 80:
+                        center_penalty = torch.tensor(0.0, device=predicted_scanpaths.device)
+                        point_center_penalty = torch.tensor(0.0, device=predicted_scanpaths.device)
+                    elif epoch <= 150:
+                        progress = (epoch - 80) / 70.0
+                        mean_center_dist = torch.mean((pred_mean - 0.5) ** 2, dim=-1)
+                        close_to_center = (mean_center_dist < 0.02).float()
+                        medium_distance = ((mean_center_dist >= 0.02) & (mean_center_dist < 0.05)).float()
+                        strong_penalty = torch.mean(close_to_center * (0.02 - mean_center_dist) * 100.0)
+                        medium_penalty = torch.mean(medium_distance * (0.05 - mean_center_dist) * 20.0)
+                        center_penalty = (strong_penalty + medium_penalty) * progress
+                        
+                        point_center_dist = torch.mean((predicted_scanpaths - 0.5) ** 2, dim=-1)
+                        point_center_penalty = torch.mean(((0.02 - point_center_dist).clamp(min=0.0)) ** 2) * 50.0 * progress
+                    else:
+                        mean_center_dist = torch.mean((pred_mean - 0.5) ** 2, dim=-1)
+                        close_to_center = (mean_center_dist < 0.02).float()
+                        medium_distance = ((mean_center_dist >= 0.02) & (mean_center_dist < 0.05)).float()
+                        strong_penalty = torch.mean(close_to_center * (0.02 - mean_center_dist) * 100.0)
+                        medium_penalty = torch.mean(medium_distance * (0.05 - mean_center_dist) * 20.0)
+                        center_penalty = strong_penalty + medium_penalty
+                        
+                        point_center_dist = torch.mean((predicted_scanpaths - 0.5) ** 2, dim=-1)
+                        point_center_penalty = torch.mean(((0.02 - point_center_dist).clamp(min=0.0)) ** 2) * 50.0
                     
                     # 7. 轨迹平滑性损失（与训练时一致）
                     pred_diffs = predicted_scanpaths[:, 1:] - predicted_scanpaths[:, :-1]
@@ -380,32 +447,59 @@ def train():
                     else:
                         direction_loss = torch.tensor(0.0, device=predicted_scanpaths.device)
                     
-                    # 8. Batch内多样性损失（与训练时一致）
-                    batch_mean = predicted_scanpaths.mean(dim=0, keepdim=True)
-                    batch_diversity = torch.mean((predicted_scanpaths - batch_mean) ** 2)
-                    min_batch_diversity = 0.01
-                    batch_diversity_loss = torch.mean(((min_batch_diversity - batch_diversity).clamp(min=0.0)) ** 2)
+                    # 8. Batch内多样性损失（与训练时一致，分阶段）
+                    if epoch <= 80:
+                        batch_diversity_loss = torch.tensor(0.0, device=predicted_scanpaths.device)
+                    else:
+                        batch_mean = predicted_scanpaths.mean(dim=0, keepdim=True)
+                        batch_diversity = torch.mean((predicted_scanpaths - batch_mean) ** 2)
+                        min_batch_diversity = 0.01
+                        batch_diversity_loss = torch.mean(((min_batch_diversity - batch_diversity).clamp(min=0.0)) ** 2)
                     
-                    # 9. 加权MSE损失（与训练时一致）
+                    # 9. 加权MSE损失（与训练时一致，分阶段）
                     position_weights = torch.ones(config.seq_len, device=predicted_scanpaths.device)
-                    position_weights[0] = 5.0
-                    position_weights[1:5] = 3.0
-                    position_weights[5:10] = 2.0
+                    if epoch <= 80:
+                        position_weights[0] = 3.0
+                        position_weights[1:5] = 2.0
+                        position_weights[5:10] = 1.5
+                    else:
+                        position_weights[0] = 2.0
+                        position_weights[1:5] = 1.5
+                        position_weights[5:10] = 1.2
                     weighted_reconstruction_loss = torch.mean(
                         position_weights.unsqueeze(0).unsqueeze(-1) * 
                         (predicted_scanpaths - true_scanpaths) ** 2
                     )
 
-                    # 总损失（与训练时完全一致）
-                    epoch_factor = min(1.0, epoch / 100.0)
-                    coverage_weight = 0.5 + 0.3 * (1.0 - epoch_factor)
-                    diversity_weight = 0.1 * (1.0 - 0.3 * epoch_factor)
-                    center_weight = 0.8 + 0.4 * (1.0 - epoch_factor)
-                    point_center_weight = 0.5 + 0.3 * (1.0 - epoch_factor)
-                    smoothness_weight = 0.1 * (1.0 - 0.3 * epoch_factor)
-                    jump_weight = 0.05
-                    direction_weight = 0.02
-                    batch_diversity_weight = 0.01 * (1.0 - 0.5 * epoch_factor)
+                    # 总损失（与训练时完全一致，分阶段）
+                    if epoch <= 80:
+                        coverage_weight = 0.0
+                        diversity_weight = 0.0
+                        center_weight = 0.0
+                        point_center_weight = 0.0
+                        smoothness_weight = 0.05
+                        jump_weight = 0.02
+                        direction_weight = 0.01
+                        batch_diversity_weight = 0.0
+                    elif epoch <= 150:
+                        progress = (epoch - 80) / 70.0
+                        coverage_weight = 0.1 * progress
+                        diversity_weight = 0.05 * progress
+                        center_weight = 0.1 * progress
+                        point_center_weight = 0.05 * progress
+                        smoothness_weight = 0.05 + 0.05 * progress
+                        jump_weight = 0.02 + 0.03 * progress
+                        direction_weight = 0.01 + 0.01 * progress
+                        batch_diversity_weight = 0.01 * progress
+                    else:
+                        coverage_weight = 0.15
+                        diversity_weight = 0.08
+                        center_weight = 0.15
+                        point_center_weight = 0.08
+                        smoothness_weight = 0.1
+                        jump_weight = 0.05
+                        direction_weight = 0.02
+                        batch_diversity_weight = 0.01
                     
                     loss = weighted_reconstruction_loss + beta * kl_loss + \
                            coverage_weight * coverage_loss + \
@@ -417,11 +511,16 @@ def train():
                            direction_weight * direction_loss + \
                            batch_diversity_weight * batch_diversity_loss
 
-                    # 计算位置误差（与训练时一致，使用加权误差）
+                    # 计算位置误差（与训练时一致，使用加权误差，分阶段）
                     position_weights_error = torch.ones(config.seq_len, device=predicted_scanpaths.device)
-                    position_weights_error[0] = 5.0
-                    position_weights_error[1:5] = 3.0
-                    position_weights_error[5:10] = 2.0
+                    if epoch <= 80:
+                        position_weights_error[0] = 3.0  # 与训练时一致
+                        position_weights_error[1:5] = 2.0
+                        position_weights_error[5:10] = 1.5
+                    else:
+                        position_weights_error[0] = 2.0
+                        position_weights_error[1:5] = 1.5
+                        position_weights_error[5:10] = 1.2
                     
                     weighted_errors = torch.norm(
                         predicted_scanpaths - true_scanpaths,
@@ -445,26 +544,41 @@ def train():
             current_lr = optimizer.param_groups[0]['lr']
             print(f"  Learning Rate: {current_lr:.6f}")
 
-            # 保存最佳模型
-            if val_loss < best_loss:
-                best_loss = val_loss
+            # 保存最佳模型：优先基于位置误差，也考虑损失
+            save_model = False
+            if val_position_error < best_val_position_error:
+                best_val_position_error = val_position_error
+                save_model = True
+                patience_counter = 0  # 重置早停计数器（基于位置误差）
+                print(f"  ✅ 验证位置误差改善: {val_position_error:.4f} (新最佳)")
+            
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                if not save_model:  # 如果位置误差没改善但损失改善了，也保存
+                    save_model = True
+            
+            if save_model:
                 best_path = os.path.join(config.checkpoint_dir, 'best_model.pth')
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
-                    'best_loss': best_loss,
+                    'best_loss': best_val_loss,
+                    'best_position_error': best_val_position_error,
                 }, best_path)
-                print(f"  保存最佳模型: {best_path}")
-                patience_counter = 0  # 重置早停计数器
+                print(f"  💾 保存最佳模型: {best_path}")
+                print(f"     最佳验证位置误差: {best_val_position_error:.4f}")
+                print(f"     最佳验证损失: {best_val_loss:.4f}")
             else:
                 patience_counter += 1
-                print(f"  验证损失未改善 ({patience_counter}/{early_stopping_patience})")
+                print(f"  ⚠️ 验证位置误差未改善 ({patience_counter}/{early_stopping_patience})")
+                print(f"     当前: {val_position_error:.4f}, 最佳: {best_val_position_error:.4f}")
 
-            # 早停检查
+            # 早停检查：基于位置误差
             if patience_counter >= early_stopping_patience:
-                print(f"\n早停触发！验证损失已经{early_stopping_patience}个epoch没有改善")
-                print(f"最佳验证损失: {best_loss:.4f} (Epoch {epoch - patience_counter})")
+                print(f"\n⏹️ 早停触发！验证位置误差已经{early_stopping_patience}个epoch没有改善")
+                print(f"最佳验证位置误差: {best_val_position_error:.4f}")
+                print(f"最佳验证损失: {best_val_loss:.4f}")
                 break
 
         # 保存检查点
