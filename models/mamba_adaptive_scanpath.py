@@ -331,7 +331,7 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
         return updated_features
 
     def forward(self, images, global_features, seq_len, gt_positions=None, teacher_forcing_ratio=0.5,
-                temperature=1.0, enable_early_stop=True, stop_threshold=0.5, min_steps=5):
+                temperature=1.0, enable_early_stop=True, stop_threshold=0.5, min_steps=5, use_gt_start=True):
         """
         前向传播
         
@@ -366,10 +366,11 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
         # 判断是否使用Teacher Forcing
         use_teacher_forcing = gt_positions is not None and self.training
 
-        # 初始位置（改进：训练和推理使用一致的策略）
-        # 关键问题：训练时使用真实起始点，推理时从边缘随机选择，导致分布不匹配
-        # 改进：训练时也使用随机初始位置（但可以通过Teacher Forcing在第一步使用真实位置）
-        if use_teacher_forcing and torch.rand(1).item() < teacher_forcing_ratio:
+        # 初始位置（改进：训练时使用真实起始点）
+        if use_gt_start and gt_positions is not None:
+            # 训练/验证时：使用真实起始点，确保序列对齐
+            prev_pos = gt_positions[:, 0, :].clone()
+        elif use_teacher_forcing and torch.rand(1).item() < teacher_forcing_ratio:
             # 训练时：按Teacher Forcing比例使用真实起始点
             prev_pos = gt_positions[:, 0, :].clone()
         else:

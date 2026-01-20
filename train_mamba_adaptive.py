@@ -17,17 +17,28 @@ from models.mamba_adaptive_scanpath import MambaAdaptiveScanpath
 import math
 
 
-def compute_teacher_forcing_ratio(epoch):
-    """指数衰减的Teacher Forcing策略"""
+def compute_teacher_forcing_ratio(epoch, step_idx=None):
+    """
+    指数衰减的Teacher Forcing策略
+
+    Args:
+        epoch: 当前训练轮次
+        step_idx: 当前序列中的步骤索引（0-29），用于前几步保持高TF
+    """
     initial_ratio = 0.7
-    final_ratio = 0.1
-    decay_epochs = 100
+    final_ratio = 0.2  # 从0.1提高到0.2
+    decay_epochs = 150  # 从100延长到150
 
     # 指数衰减: ratio = 0.7 * exp(-k * epoch)
     k = -math.log(final_ratio / initial_ratio) / decay_epochs
-    ratio = initial_ratio * math.exp(-k * epoch)
+    base_ratio = initial_ratio * math.exp(-k * epoch)
+    base_ratio = max(base_ratio, final_ratio)
 
-    return max(ratio, final_ratio)
+    # 前5步保持更高的Teacher Forcing，确保序列起始对齐
+    if step_idx is not None and step_idx < 5:
+        return min(base_ratio + 0.3, 0.95)
+
+    return base_ratio
 
 
 def compute_spatial_coverage_loss(pred_scanpaths):
@@ -47,13 +58,13 @@ def compute_spatial_coverage_loss(pred_scanpaths):
     diversity_x = torch.mean(((0.015 - pred_var[:, 0]).clamp(min=0.0)) ** 2)
     diversity_y = torch.mean(((0.025 - pred_var[:, 1]).clamp(min=0.0)) ** 2)
 
-    # Y方向中心聚集惩罚
+    # Y方向中心聚集惩罚（修复：惩罚偏离0.5的任何方向）
     y_center_dist = torch.abs(pred_mean[:, 1] - 0.5)
-    y_too_centered = (y_center_dist < 0.1).float()
-    y_center_penalty = torch.mean(y_too_centered * (0.1 - y_center_dist) ** 2)
+    # 允许±0.05的偏差，超出则惩罚（修复y_mean=0.61的问题）
+    y_bias_penalty = torch.mean((y_center_dist - 0.05).clamp(min=0.0) ** 2)
 
     # 内部加权组合
-    return coverage_x + 3.0*coverage_y + diversity_x + 5.0*diversity_y + 10.0*y_center_penalty
+    return coverage_x + 3.0*coverage_y + diversity_x + 5.0*diversity_y + 15.0*y_bias_penalty
 
 
 def compute_trajectory_smoothness_loss(pred_scanpaths, true_scanpaths):
@@ -112,6 +123,28 @@ def compute_direction_consistency_loss(pred_scanpaths, true_scanpaths):
         continuity_loss = torch.tensor(0.0, device=pred_scanpaths.device)
 
     return direction_loss + continuity_loss
+
+
+def compute_sequence_alignment_loss(pred_scanpaths, true_scanpaths):
+    """
+    序列对齐损失：鼓励预测序列与真实序列在时间上对齐
+    前几步给予更高权重，确保起始点和早期轨迹匹配
+    """
+    B, T, D = pred_scanpaths.shape
+
+    # 计算每个预测点与对应真实点的距离
+    point_distances = torch.norm(pred_scanpaths - true_scanpaths, dim=-1)  # (B, T)
+
+    # 前几步给予更高权重（对LEV指标至关重要）
+    weights = torch.ones(T, device=pred_scanpaths.device)
+    weights[:5] = 5.0   # 前5步权重x5（起始点对齐）
+    weights[5:10] = 3.0  # 5-10步权重x3
+    weights[10:15] = 2.0  # 10-15步权重x2
+
+    # 加权平均
+    alignment_loss = torch.mean(point_distances * weights.unsqueeze(0))
+
+    return alignment_loss
 
 
 def train():
@@ -193,14 +226,16 @@ def train():
             teacher_forcing_ratio = compute_teacher_forcing_ratio(epoch)
 
             # 训练时显式设置enable_early_stop=False，确保返回3个值
+            # use_gt_start=True 确保使用真实起始点，改善LEV指标
             predicted_scanpaths, mus, logvars = model(
                 images,
                 gt_scanpaths=true_scanpaths,
                 teacher_forcing_ratio=teacher_forcing_ratio,
-                enable_early_stop=False
+                enable_early_stop=False,
+                use_gt_start=True  # 使用真实起始点
             )
 
-            # ========== 简化损失函数（13项 -> 6项）==========
+            # ========== 简化损失函数（13项 -> 7项）==========
             # 1. 重构损失（准确匹配真实路径）
             reconstruction_loss = nn.functional.mse_loss(predicted_scanpaths, true_scanpaths)
 
@@ -217,7 +252,10 @@ def train():
             # 5. 方向一致性损失（合并direction + direction_continuity）
             direction_consistency_loss = compute_direction_consistency_loss(predicted_scanpaths, true_scanpaths)
 
-            # 6. 边界约束
+            # 6. 序列对齐损失（新增：改善LEV指标）
+            sequence_alignment_loss = compute_sequence_alignment_loss(predicted_scanpaths, true_scanpaths)
+
+            # 7. 边界约束
             boundary_min = 0.02
             boundary_max = 0.98
             below_boundary = (predicted_scanpaths < boundary_min).float()
@@ -227,33 +265,36 @@ def train():
                 above_boundary * (predicted_scanpaths - boundary_max) ** 2
             )
 
-            # ========== 简化权重调度 ==========
+            # ========== 改进的权重调度 ==========
             if epoch <= 80:
                 weights = {
-                    'reconstruction': 1.0,
-                    'kl': 0.005,
+                    'reconstruction': 2.0,  # 提高（从1.0到2.0）
+                    'kl': 0.001,            # 降低（从0.005到0.001）
                     'spatial_coverage': 0.5,
                     'trajectory_smoothness': 1.5,
                     'direction_consistency': 0.5,
+                    'sequence_alignment': 2.0,  # 新增：高权重改善LEV
                     'boundary': 0.2
                 }
             elif epoch <= 150:
                 progress = (epoch - 80) / 70.0
                 weights = {
-                    'reconstruction': 1.0,
-                    'kl': 0.005,
+                    'reconstruction': 2.0,
+                    'kl': 0.001,
                     'spatial_coverage': 0.5 + 0.3*progress,
                     'trajectory_smoothness': 1.5,
                     'direction_consistency': 0.5,
+                    'sequence_alignment': 2.0 + 1.0*progress,  # 逐渐增加到3.0
                     'boundary': 0.2
                 }
             else:
                 weights = {
-                    'reconstruction': 1.0,
-                    'kl': 0.005,
+                    'reconstruction': 2.0,
+                    'kl': 0.001,
                     'spatial_coverage': 0.8,
                     'trajectory_smoothness': 1.5,
                     'direction_consistency': 0.5,
+                    'sequence_alignment': 3.0,  # 最终高权重
                     'boundary': 0.2
                 }
 
@@ -264,6 +305,7 @@ def train():
                 weights['spatial_coverage'] * spatial_coverage_loss +
                 weights['trajectory_smoothness'] * trajectory_smoothness_loss +
                 weights['direction_consistency'] * direction_consistency_loss +
+                weights['sequence_alignment'] * sequence_alignment_loss +
                 weights['boundary'] * boundary_penalty
             )
 
@@ -303,9 +345,8 @@ def train():
                     'Loss': f"{avg_loss:.4f}",
                     'PosErr': f"{avg_error:.4f}",
                     'TF': f"{teacher_forcing_ratio:.3f}",
+                    'SeqAlign': f"{sequence_alignment_loss.item():.4f}",
                     'SpatCov': f"{spatial_coverage_loss.item():.4f}",
-                    'TrajSmooth': f"{trajectory_smoothness_loss.item():.4f}",
-                    'DirCons': f"{direction_consistency_loss.item():.4f}",
                 })
 
         # 平均训练指标
@@ -334,7 +375,10 @@ def train():
                     # 前向传播 - 验证模式
                     # 使用较低的Teacher Forcing，更接近推理时的0.0
                     val_teacher_forcing = max(0.05, teacher_forcing_ratio * 0.3)
-                    result = model(images, gt_scanpaths=true_scanpaths, teacher_forcing_ratio=val_teacher_forcing, enable_early_stop=False)
+                    result = model(images, gt_scanpaths=true_scanpaths,
+                                 teacher_forcing_ratio=val_teacher_forcing,
+                                 enable_early_stop=False,
+                                 use_gt_start=True)  # 验证时也使用真实起始点
                     # 安全解包：无论返回3个还是5个值，都只取前3个
                     predicted_scanpaths = result[0]
                     mus = result[1]
@@ -357,7 +401,10 @@ def train():
                     # 5. 方向一致性损失
                     direction_consistency_loss = compute_direction_consistency_loss(predicted_scanpaths, true_scanpaths)
 
-                    # 6. 边界约束
+                    # 6. 序列对齐损失
+                    sequence_alignment_loss = compute_sequence_alignment_loss(predicted_scanpaths, true_scanpaths)
+
+                    # 7. 边界约束
                     boundary_min = 0.02
                     boundary_max = 0.98
                     below_boundary = (predicted_scanpaths < boundary_min).float()
@@ -370,30 +417,33 @@ def train():
                     # 使用与训练相同的权重
                     if epoch <= 80:
                         weights = {
-                            'reconstruction': 1.0,
-                            'kl': 0.005,
+                            'reconstruction': 2.0,
+                            'kl': 0.001,
                             'spatial_coverage': 0.5,
                             'trajectory_smoothness': 1.5,
                             'direction_consistency': 0.5,
+                            'sequence_alignment': 2.0,
                             'boundary': 0.2
                         }
                     elif epoch <= 150:
                         progress = (epoch - 80) / 70.0
                         weights = {
-                            'reconstruction': 1.0,
-                            'kl': 0.005,
+                            'reconstruction': 2.0,
+                            'kl': 0.001,
                             'spatial_coverage': 0.5 + 0.3*progress,
                             'trajectory_smoothness': 1.5,
                             'direction_consistency': 0.5,
+                            'sequence_alignment': 2.0 + 1.0*progress,
                             'boundary': 0.2
                         }
                     else:
                         weights = {
-                            'reconstruction': 1.0,
-                            'kl': 0.005,
+                            'reconstruction': 2.0,
+                            'kl': 0.001,
                             'spatial_coverage': 0.8,
                             'trajectory_smoothness': 1.5,
                             'direction_consistency': 0.5,
+                            'sequence_alignment': 3.0,
                             'boundary': 0.2
                         }
 
@@ -404,6 +454,7 @@ def train():
                         weights['spatial_coverage'] * spatial_coverage_loss +
                         weights['trajectory_smoothness'] * trajectory_smoothness_loss +
                         weights['direction_consistency'] * direction_consistency_loss +
+                        weights['sequence_alignment'] * sequence_alignment_loss +
                         weights['boundary'] * boundary_penalty
                     )
 
