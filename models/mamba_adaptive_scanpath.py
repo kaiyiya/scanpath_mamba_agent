@@ -705,10 +705,10 @@ class MambaAdaptiveScanpath(nn.Module):
         self.norm = nn.LayerNorm(config.feature_dim)
 
     def forward(self, images, gt_scanpaths=None, teacher_forcing_ratio=0.5, temperature=1.0,
-                enable_early_stop=None, stop_threshold=0.5, min_steps=5):
+                enable_early_stop=None, stop_threshold=0.5, min_steps=5, use_gt_start=True):
         """
         前向传播
-        
+
         Args:
             images: 输入图像 (B, 3, H, W)
             gt_scanpaths: 真实扫描路径（训练时使用） (B, seq_len, 2)
@@ -717,6 +717,7 @@ class MambaAdaptiveScanpath(nn.Module):
             enable_early_stop: 是否启用自动停止（None时自动判断：训练=False，推理=True）
             stop_threshold: 停止阈值（默认0.5）
             min_steps: 最小步数（默认5）
+            use_gt_start: 是否使用真实起始点（默认True，改善LEV指标）
         Returns:
             predicted_scanpaths: 预测的扫描路径 (B, seq_len, 2)
             mus: VAE均值 (B, seq_len, d_model//2)
@@ -742,7 +743,8 @@ class MambaAdaptiveScanpath(nn.Module):
             temperature=temperature,
             enable_early_stop=enable_early_stop,
             stop_threshold=stop_threshold,
-            min_steps=min_steps
+            min_steps=min_steps,
+            use_gt_start=use_gt_start
         )
 
         predicted_scanpaths, _, mus, logvars, stop_probs, actual_lengths = result
