@@ -1,0 +1,117 @@
+Loading test data from ../../adaptive_scanpath/data_processing/processed_data/Salient360_H_HE_processed.pkl...
+Expanding dataset: each scanpath becomes an independent sample...
+Loaded 2424 samples from 22 images (augmentation: False)
+  Average 110.2 scanpaths per image
+加载模型...
+成功加载模型 (Epoch 15)
+
+开始评估 10 个样本...
+
+/home/featurize/work/eye/scanpath_mamba_agent/models/mamba_adaptive_scanpath.py:244: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.clone().detach() or sourceTensor.clone().detach().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  y_start = int(torch.clamp(torch.tensor(y_center), 0, H - patch_size).item())
+样本 0 (共 125 条GT路径):
+  最佳匹配:
+    LEV=30.00, DTW=800579.05, REC=0.00
+    SIM=54.9745 (越小越好)
+    MM_Vector=0.126, MM_Length=0.031, MM_Position=0.000
+    NSS=0.047, CC=0.016, SalCoverage=0.200
+
+样本 1 (共 128 条GT路径):
+  最佳匹配:
+    LEV=30.00, DTW=415089.72, REC=0.00
+    SIM=34.6438 (越小越好)
+    MM_Vector=0.568, MM_Length=0.409, MM_Position=0.000
+    NSS=0.357, CC=0.079, SalCoverage=0.400
+
+样本 2 (共 121 条GT路径):
+  最佳匹配:
+    LEV=30.00, DTW=1041182.56, REC=0.00
+    SIM=68.7774 (越小越好)
+    MM_Vector=0.252, MM_Length=0.000, MM_Position=0.000
+    NSS=0.173, CC=0.028, SalCoverage=0.433
+
+样本 3 (共 101 条GT路径):
+  最佳匹配:
+    LEV=30.00, DTW=444526.31, REC=0.00
+    SIM=34.7991 (越小越好)
+    MM_Vector=0.000, MM_Length=0.030, MM_Position=0.000
+    NSS=0.158, CC=0.037, SalCoverage=0.367
+
+样本 4 (共 97 条GT路径):
+  最佳匹配:
+    LEV=30.00, DTW=454686.60, REC=0.00
+    SIM=35.1602 (越小越好)
+    MM_Vector=0.000, MM_Length=0.000, MM_Position=0.000
+    NSS=0.987, CC=0.220, SalCoverage=0.500
+
+样本 5 (共 119 条GT路径):
+  最佳匹配:
+    LEV=30.00, DTW=565385.30, REC=0.00
+    SIM=38.5621 (越小越好)
+    MM_Vector=0.000, MM_Length=0.000, MM_Position=0.000
+    NSS=0.704, CC=0.179, SalCoverage=0.533
+
+样本 6 (共 86 条GT路径):
+  最佳匹配:
+    LEV=30.00, DTW=670489.01, REC=0.00
+    SIM=48.2263 (越小越好)
+    MM_Vector=0.148, MM_Length=0.000, MM_Position=0.000
+    NSS=0.809, CC=0.151, SalCoverage=0.467
+
+样本 7 (共 112 条GT路径):
+  最佳匹配:
+    LEV=30.00, DTW=636500.13, REC=0.00
+    SIM=42.7216 (越小越好)
+    MM_Vector=0.000, MM_Length=0.143, MM_Position=0.000
+    NSS=0.670, CC=0.135, SalCoverage=0.367
+
+样本 8 (共 107 条GT路径):
+  最佳匹配:
+    LEV=30.00, DTW=231862.23, REC=0.00
+    SIM=17.6459 (越小越好)
+    MM_Vector=0.000, MM_Length=0.000, MM_Position=0.000
+    NSS=1.348, CC=0.259, SalCoverage=0.600
+
+样本 9 (共 91 条GT路径):
+  最佳匹配:
+    LEV=30.00, DTW=504718.84, REC=0.00
+    SIM=39.6473 (越小越好)
+    MM_Vector=0.000, MM_Length=0.000, MM_Position=0.000
+    NSS=0.530, CC=0.127, SalCoverage=0.467
+
+======================================================================
+汇总统计 (基于 10 个样本):
+======================================================================
+
+【最佳匹配指标】
+  LEV         :  30.000 ±  0.000
+  DTW         : 576501.975 ± 214694.051
+  REC         :   0.000 ±  0.000
+  SIM         :  41.516 ± 12.983
+  MM_Vector   :   0.109 ±  0.174
+  MM_Length   :   0.061 ±  0.123
+  MM_Position :   0.000 ±  0.000
+
+【显著性指标】
+  NSS         :   0.578 ±  0.389
+  CC          :   0.123 ±  0.079
+  SalCoverage :   0.433 ±  0.104
+
+【平均指标】
+  LEV         :  30.000 ±  0.000
+  DTW         : 1385646.386 ± 171172.728
+  REC         :   0.067 ±  0.174
+  SIM         :  94.368 ± 11.417
+======================================================================
+
+指标说明:
+  LEV: Levenshtein距离 (越小越好, <20优秀, 20-25良好, >25一般)
+  DTW: 动态时间规整距离 (越小越好)
+  REC: 重现率 (越大越好)
+  SIM: 平均欧氏距离 (越小越好, <0.2优秀, 0.2-0.3良好)
+  MM_Vector: 方向相似度 (0-1, 越大越好)
+  MM_Length: 步长相似度 (0-1, 越大越好)
+  MM_Position: 位置相似度 (0-1, 越大越好)
+  NSS: 归一化显著性得分 (越大越好)
+  CC: 相关系数 (0-1, 越大越好)
+  SalCoverage: 显著性覆盖率 (0-1, 越大越好)
