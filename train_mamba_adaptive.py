@@ -27,8 +27,8 @@ def compute_teacher_forcing_ratio(epoch, step_idx=None):
         step_idx: 当前序列中的步骤索引（0-29），用于前几步保持高TF
     """
     initial_ratio = 0.8  # 降低初始比例（从0.9到0.8）
-    final_ratio = 0.2    # 降低最终比例（从0.5到0.2），让模型学会自主生成
-    decay_epochs = 50    # 调整为50 epoch
+    final_ratio = 0.2  # 降低最终比例（从0.5到0.2），让模型学会自主生成
+    decay_epochs = 50  # 调整为50 epoch
 
     # 指数衰减: ratio = 0.8 * exp(-k * epoch)
     k = -math.log(final_ratio / initial_ratio) / decay_epochs
@@ -51,14 +51,15 @@ def compute_teacher_forcing_ratio(epoch, step_idx=None):
 
 
 def compute_spatial_coverage_loss(pred_scanpaths):
-    """合并覆盖范围、多样性和中心聚集惩罚"""
+    """合并覆盖范围、多样性和中心聚集惩罚（改进版：提高Y方向覆盖）"""
     # 覆盖范围
     pred_min = pred_scanpaths.min(dim=1)[0]
     pred_max = pred_scanpaths.max(dim=1)[0]
     pred_range = pred_max - pred_min
 
-    coverage_x = torch.mean(((0.3 - pred_range[:, 0]).clamp(min=0.0)) ** 2)
-    coverage_y = torch.mean(((0.25 - pred_range[:, 1]).clamp(min=0.0)) ** 2)
+    # 提高覆盖目标：X方向0.5，Y方向0.5（之前是0.3和0.25）
+    coverage_x = torch.mean(((0.5 - pred_range[:, 0]).clamp(min=0.0)) ** 2)
+    coverage_y = torch.mean(((0.5 - pred_range[:, 1]).clamp(min=0.0)) ** 2)
 
     # 多样性
     pred_mean = pred_scanpaths.mean(dim=1)
@@ -69,11 +70,11 @@ def compute_spatial_coverage_loss(pred_scanpaths):
 
     # Y方向中心聚集惩罚（修复：惩罚偏离0.5的任何方向）
     y_center_dist = torch.abs(pred_mean[:, 1] - 0.5)
-    # 允许±0.05的偏差，超出则惩罚（修复y_mean=0.61的问题）
-    y_bias_penalty = torch.mean((y_center_dist - 0.05).clamp(min=0.0) ** 2)
+    # 允许±0.1的偏差（放宽限制），超出则惩罚
+    y_bias_penalty = torch.mean((y_center_dist - 0.1).clamp(min=0.0) ** 2)
 
-    # 内部加权组合
-    return coverage_x + 3.0*coverage_y + diversity_x + 5.0*diversity_y + 15.0*y_bias_penalty
+    # 内部加权组合（降低y_bias_penalty权重，给Y方向更多自由）
+    return coverage_x + 3.0 * coverage_y + diversity_x + 5.0 * diversity_y + 5.0 * y_bias_penalty
 
 
 def compute_trajectory_smoothness_loss(pred_scanpaths, true_scanpaths):
@@ -98,7 +99,7 @@ def compute_trajectory_smoothness_loss(pred_scanpaths, true_scanpaths):
     else:
         accel_loss = torch.tensor(0.0, device=pred_scanpaths.device)
 
-    return step_loss + 0.5*jump_loss + 0.3*accel_loss
+    return step_loss + 0.5 * jump_loss + 0.3 * accel_loss
 
 
 def compute_direction_consistency_loss(pred_scanpaths, true_scanpaths):
@@ -150,12 +151,12 @@ def compute_sequence_alignment_loss(pred_scanpaths, true_scanpaths):
 
     # 权重配置：降低权重，避免过度约束（之前权重太高导致模型"卡住"）
     weights = torch.ones(T, device=pred_scanpaths.device)
-    weights[:5] = 3.0    # 前5步：权重3.0（从15.0降低）
+    weights[:5] = 3.0  # 前5步：权重3.0（从15.0降低）
     weights[5:10] = 2.5  # 5-10步：权重2.5（从10.0降低）
-    weights[10:15] = 2.0 # 10-15步：权重2.0（从8.0降低）
-    weights[15:20] = 1.5 # 15-20步：权重1.5（从6.0降低）
-    weights[20:25] = 1.3 # 20-25步：权重1.3（从5.0降低）
-    weights[25:] = 1.2   # 25-30步：权重1.2（从4.0降低）
+    weights[10:15] = 2.0  # 10-15步：权重2.0（从8.0降低）
+    weights[15:20] = 1.5  # 15-20步：权重1.5（从6.0降低）
+    weights[20:25] = 1.3  # 20-25步：权重1.3（从5.0降低）
+    weights[25:] = 1.2  # 25-30步：权重1.2（从4.0降低）
 
     # 计算所有30步的加权平均
     alignment_loss = torch.mean(point_distances * weights.unsqueeze(0))
@@ -227,9 +228,9 @@ def train():
     best_loss = float('inf')
 
     for epoch in range(1, config.num_epochs + 1):
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"Epoch {epoch}/{config.num_epochs}")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         # 训练
         model.train()
@@ -285,50 +286,53 @@ def train():
                 above_boundary * (predicted_scanpaths - boundary_max) ** 2
             )
 
-            # ========== 方案A权重配置：平衡版本（修复"卡住"问题）==========
+            # ========== 方案A权重配置：改进版（解决覆盖不足问题）==========
             # 调整为50 epoch的训练计划
-            # 关键修复：大幅降低sequence_alignment外部权重，避免过度约束
+            # 关键改进：
+            # 1. 大幅提高spatial_coverage权重，鼓励探索整个图像
+            # 2. 降低trajectory_smoothness权重，允许更大的步长
+            # 3. 增加多样性，减少过拟合
             if epoch <= 20:
                 weights = {
-                    'reconstruction': 3.0,      # 降低（从5.0到3.0）
-                    'kl': 0.002,                # 提高（从0.001到0.002），增加多样性
-                    'spatial_coverage': 0.5,    # 提高（从0.3到0.5）
-                    'trajectory_smoothness': 1.0,
-                    'direction_consistency': 0.5,
-                    'sequence_alignment': 2.0,  # 大幅降低（从10.0到2.0）
+                    'reconstruction': 2.0,  # 降低（从3.0到2.0），给其他损失更多空间
+                    'kl': 0.003,  # 提高（从0.002到0.003），增加多样性
+                    'spatial_coverage': 2.0,  # 大幅提高（从0.5到2.0），鼓励覆盖整个图像
+                    'trajectory_smoothness': 0.3,  # 大幅降低（从1.0到0.3），允许大步长
+                    'direction_consistency': 0.3,  # 降低（从0.5到0.3）
+                    'sequence_alignment': 1.5,  # 降低（从2.0到1.5）
                     'boundary': 0.2
                 }
             elif epoch <= 40:
                 progress = (epoch - 20) / 20.0
                 weights = {
-                    'reconstruction': 3.0 + 1.0*progress,  # 逐渐增加到4.0（从7.0降低）
-                    'kl': 0.002,                           # 保持
-                    'spatial_coverage': 0.5,
-                    'trajectory_smoothness': 1.0,
-                    'direction_consistency': 0.5,
-                    'sequence_alignment': 2.0 + 1.0*progress,  # 逐渐增加到3.0（从15.0降低）
+                    'reconstruction': 2.0 + 0.5 * progress,  # 逐渐增加到2.5
+                    'kl': 0.003,
+                    'spatial_coverage': 2.0 + 0.5 * progress,  # 逐渐增加到2.5
+                    'trajectory_smoothness': 0.3,
+                    'direction_consistency': 0.3,
+                    'sequence_alignment': 1.5 + 0.5 * progress,  # 逐渐增加到2.0
                     'boundary': 0.2
                 }
             else:
                 weights = {
-                    'reconstruction': 4.0,      # 最终权重（从7.0降低）
-                    'kl': 0.002,                # 保持
-                    'spatial_coverage': 0.5,
-                    'trajectory_smoothness': 1.0,
-                    'direction_consistency': 0.5,
-                    'sequence_alignment': 3.0,  # 最终权重（从15.0降低）
+                    'reconstruction': 2.5,  # 最终权重
+                    'kl': 0.003,
+                    'spatial_coverage': 2.5,  # 最终权重（高）
+                    'trajectory_smoothness': 0.3,  # 保持低
+                    'direction_consistency': 0.3,
+                    'sequence_alignment': 2.0,
                     'boundary': 0.2
                 }
 
             # 计算总损失（移除batch_diversity项）
             loss = (
-                weights['reconstruction'] * reconstruction_loss +
-                weights['kl'] * kl_loss +
-                weights['spatial_coverage'] * spatial_coverage_loss +
-                weights['trajectory_smoothness'] * trajectory_smoothness_loss +
-                weights['direction_consistency'] * direction_consistency_loss +
-                weights['sequence_alignment'] * sequence_alignment_loss +
-                weights['boundary'] * boundary_penalty
+                    weights['reconstruction'] * reconstruction_loss +
+                    weights['kl'] * kl_loss +
+                    weights['spatial_coverage'] * spatial_coverage_loss +
+                    weights['trajectory_smoothness'] * trajectory_smoothness_loss +
+                    weights['direction_consistency'] * direction_consistency_loss +
+                    weights['sequence_alignment'] * sequence_alignment_loss +
+                    weights['boundary'] * boundary_penalty
             )
 
             # 反向传播
@@ -347,7 +351,7 @@ def train():
                 position_weights_error[0] = 2.0
                 position_weights_error[1:5] = 1.5
                 position_weights_error[5:10] = 1.2
-            
+
             # 加权位置误差
             weighted_errors = torch.norm(
                 predicted_scanpaths - true_scanpaths,
@@ -399,9 +403,9 @@ def train():
                     # 平衡版本：验证时使用更低的Teacher Forcing
                     val_teacher_forcing = max(0.1, teacher_forcing_ratio * 0.3)
                     result = model(images, gt_scanpaths=true_scanpaths,
-                                 teacher_forcing_ratio=val_teacher_forcing,
-                                 enable_early_stop=False,
-                                 use_gt_start=True)  # 验证时也使用真实起始点
+                                   teacher_forcing_ratio=val_teacher_forcing,
+                                   enable_early_stop=False,
+                                   use_gt_start=True)  # 验证时也使用真实起始点
                     # 安全解包：无论返回3个还是5个值，都只取前3个
                     predicted_scanpaths = result[0]
                     mus = result[1]
@@ -437,48 +441,48 @@ def train():
                         above_boundary * (predicted_scanpaths - boundary_max) ** 2
                     )
 
-                    # 使用与训练相同的权重（方案A - 平衡版本）
+                    # 使用与训练相同的权重（方案A - 改进版）
                     if epoch <= 20:
                         weights = {
-                            'reconstruction': 3.0,
-                            'kl': 0.002,
-                            'spatial_coverage': 0.5,
-                            'trajectory_smoothness': 1.0,
-                            'direction_consistency': 0.5,
-                            'sequence_alignment': 2.0,
+                            'reconstruction': 2.0,
+                            'kl': 0.003,
+                            'spatial_coverage': 2.0,
+                            'trajectory_smoothness': 0.3,
+                            'direction_consistency': 0.3,
+                            'sequence_alignment': 1.5,
                             'boundary': 0.2
                         }
                     elif epoch <= 40:
                         progress = (epoch - 20) / 20.0
                         weights = {
-                            'reconstruction': 3.0 + 1.0*progress,
-                            'kl': 0.002,
-                            'spatial_coverage': 0.5,
-                            'trajectory_smoothness': 1.0,
-                            'direction_consistency': 0.5,
-                            'sequence_alignment': 2.0 + 1.0*progress,
+                            'reconstruction': 2.0 + 0.5 * progress,
+                            'kl': 0.003,
+                            'spatial_coverage': 2.0 + 0.5 * progress,
+                            'trajectory_smoothness': 0.3,
+                            'direction_consistency': 0.3,
+                            'sequence_alignment': 1.5 + 0.5 * progress,
                             'boundary': 0.2
                         }
                     else:
                         weights = {
-                            'reconstruction': 4.0,
-                            'kl': 0.002,
-                            'spatial_coverage': 0.5,
-                            'trajectory_smoothness': 1.0,
-                            'direction_consistency': 0.5,
-                            'sequence_alignment': 3.0,
+                            'reconstruction': 2.5,
+                            'kl': 0.003,
+                            'spatial_coverage': 2.5,
+                            'trajectory_smoothness': 0.3,
+                            'direction_consistency': 0.3,
+                            'sequence_alignment': 2.0,
                             'boundary': 0.2
                         }
 
                     # 计算总损失（移除batch_diversity项）
                     loss = (
-                        weights['reconstruction'] * reconstruction_loss +
-                        weights['kl'] * kl_loss +
-                        weights['spatial_coverage'] * spatial_coverage_loss +
-                        weights['trajectory_smoothness'] * trajectory_smoothness_loss +
-                        weights['direction_consistency'] * direction_consistency_loss +
-                        weights['sequence_alignment'] * sequence_alignment_loss +
-                        weights['boundary'] * boundary_penalty
+                            weights['reconstruction'] * reconstruction_loss +
+                            weights['kl'] * kl_loss +
+                            weights['spatial_coverage'] * spatial_coverage_loss +
+                            weights['trajectory_smoothness'] * trajectory_smoothness_loss +
+                            weights['direction_consistency'] * direction_consistency_loss +
+                            weights['sequence_alignment'] * sequence_alignment_loss +
+                            weights['boundary'] * boundary_penalty
                     )
 
                     # 计算位置误差
@@ -510,12 +514,12 @@ def train():
                 save_model = True
                 patience_counter = 0  # 重置早停计数器（基于位置误差）
                 print(f"  ✅ 验证位置误差改善: {val_position_error:.4f} (新最佳)")
-            
+
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 if not save_model:  # 如果位置误差没改善但损失改善了，也保存
                     save_model = True
-            
+
             if save_model:
                 best_path = os.path.join(config.checkpoint_dir, 'best_model.pth')
                 torch.save({
