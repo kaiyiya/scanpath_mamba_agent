@@ -8,7 +8,7 @@ from typing import Tuple
 
 
 def compute_lev(pred_scanpath: np.ndarray, true_scanpath: np.ndarray,
-                image_size: Tuple[int, int] = (256, 512), grid_size: int = 32) -> float:
+                image_size: Tuple[int, int] = (256, 512), grid_size: int = 12) -> float:
     """
     计算Levenshtein Distance (编辑距离)
     使用基于网格的离散化（而不是像素级别），更加合理和容忍小的位置误差
@@ -17,14 +17,16 @@ def compute_lev(pred_scanpath: np.ndarray, true_scanpath: np.ndarray,
         pred_scanpath: 预测路径 (T, 2)，坐标范围[0, 1]，格式为(x, y)
         true_scanpath: 真实路径 (T, 2)，坐标范围[0, 1]，格式为(x, y)
         image_size: 图像尺寸 (height, width)，用于离散化
-        grid_size: 网格大小（默认32x32，而不是像素级别）
+        grid_size: 网格大小（默认12x12，平衡精度和容错性）
+                  - 12x12: 每格约0.083，适合position_error在0.1左右的模型
+                  - 之前32x32太严格（每格0.031），导致LEV总是接近最大值
 
     Returns:
         编辑距离（越小越好）
     """
 
     # 将连续坐标离散化为网格（而不是像素）
-    # 使用32x32网格，这样更合理，可以容忍小的位置误差
+    # 使用12x12网格，平衡精度和容错性
     def discretize_to_grid(scanpath, grid_size):
         # 将[0,1]坐标映射到网格索引 (0 到 grid_size-1)
         # scanpath格式是(x, y)，所以x对应宽度方向，y对应高度方向
@@ -150,7 +152,7 @@ def compute_rec(pred_scanpath: np.ndarray, true_scanpath: np.ndarray,
 
 
 def compute_all_metrics(pred_scanpath: np.ndarray, true_scanpath: np.ndarray,
-                        image_size: Tuple[int, int] = (256, 512), grid_size: int = 32) -> dict:
+                        image_size: Tuple[int, int] = (256, 512), grid_size: int = 12) -> dict:
     """
     计算所有评估指标
 
@@ -158,7 +160,7 @@ def compute_all_metrics(pred_scanpath: np.ndarray, true_scanpath: np.ndarray,
         pred_scanpath: 预测路径 (T, 2)，坐标范围[0, 1]，格式为(x, y)
         true_scanpath: 真实路径 (T, 2)，坐标范围[0, 1]，格式为(x, y)
         image_size: 图像尺寸 (height, width)
-        grid_size: LEV计算时使用的网格大小（默认32x32）
+        grid_size: LEV计算时使用的网格大小（默认12x12，平衡精度和容错性）
 
     Returns:
         包含所有指标的字典

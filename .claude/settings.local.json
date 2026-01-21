@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(D:/Anaconda/envs/pytorch/python.exe -c:*)"
+      "Bash(D:/Anaconda/envs/pytorch/python.exe -c:*)",
+      "Bash(find:*)"
     ]
   }
 }
