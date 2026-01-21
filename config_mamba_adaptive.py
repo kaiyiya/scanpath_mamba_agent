@@ -31,12 +31,12 @@ class MambaAdaptiveConfig:
     stop_threshold = 0.5  # 停止阈值，继续概率低于此值时停止
     min_steps = 5  # 最小步数，至少生成这么多步才允许停止
 
-    # 训练参数
-    batch_size = 8
-    num_epochs = 300  # 增加到300 epochs（参考ScanDMM的500 epochs训练策略）
-    learning_rate = 1e-4  # 提高初始学习率（从5e-5到1e-4），加快训练速度
+    # 训练参数（快速验证配置）
+    batch_size = 16  # 增加batch size（从8到16），加快训练速度
+    num_epochs = 50  # 大幅减少epoch（从300到50），快速验证效果
+    learning_rate = 2e-4  # 提高学习率（从1e-4到2e-4），加快收敛
     weight_decay = 2e-3  # 增加权重衰减（从1e-3提升到2e-3）
-    lr_decay = 0.9995  # 学习率衰减因子（每个epoch衰减，从0.9999调整为0.9995，更快的衰减）
+    lr_decay = 0.995  # 学习率衰减因子（从0.9995调整为0.995，更快的衰减）
 
     # 数据增强
     use_augmentation = True  # 启用数据增强
@@ -45,14 +45,14 @@ class MambaAdaptiveConfig:
     num_workers = 0
     pin_memory = True
 
-    # 日志和保存
-    log_dir = './logs_adaptive'
-    checkpoint_dir = './checkpoints_adaptive'
-    save_interval = 5
+    # 日志和保存（快速验证配置）
+    log_dir = './logs'  # 使用原logs目录
+    checkpoint_dir = './checkpoints'  # 使用原checkpoints目录
+    save_interval = 10  # 减少保存频率（从5到10）
     log_interval = 10
 
-    # 验证
-    val_interval = 5
+    # 验证（快速验证配置）
+    val_interval = 5  # 每5个epoch验证一次
 
     # ==================== 新增配置项 ====================
     # 第一阶段配置

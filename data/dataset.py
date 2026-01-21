@@ -12,20 +12,53 @@ class Salient360ScanpathDataset(Dataset):
         print(f"Loading {split} data from {data_path}...")
         with open(data_path, 'rb') as f:
             data_dict = pickle.load(f)
-        self.data = data_dict[split]
+        raw_data = data_dict[split]
         self.seq_len = seq_len
-        self.keys = list(self.data.keys())
         self.augment = augment and (split == 'train')  # 仅在训练时增强
-        print(f"Loaded {len(self.keys)} samples (augmentation: {self.augment})")
+
+        # 方案3：展开数据集，每条路径作为独立样本
+        # 这样解决了"同一图像每次对应不同GT"的问题
+        print(f"Expanding dataset: each scanpath becomes an independent sample...")
+        self.samples = []
+        for key in raw_data.keys():
+            sample = raw_data[key]
+            scanpaths = sample['scanpaths_2d']
+
+            # 处理 object 类型
+            if scanpaths.dtype == np.object_:
+                scanpaths_list = []
+                for i in range(len(scanpaths)):
+                    sp = np.array(scanpaths[i], dtype=np.float32)
+                    if sp.shape[1] == 3:
+                        sp = sp[:, :2]
+                    scanpaths_list.append(sp)
+                scanpaths = np.array(scanpaths_list, dtype=np.float32)
+
+            # 确保是 2D 坐标
+            if scanpaths.shape[2] == 3:
+                scanpaths = scanpaths[:, :, :2]
+
+            # 为每条路径创建一个独立样本
+            for scanpath_idx in range(len(scanpaths)):
+                self.samples.append({
+                    'key': key,
+                    'image': sample['image'],
+                    'saliency_map': sample.get('saliency_map') or sample.get('salmap'),
+                    'scanpath': scanpaths[scanpath_idx].copy(),
+                    'scanpath_idx': scanpath_idx
+                })
+
+        print(f"Loaded {len(self.samples)} samples from {len(raw_data)} images (augmentation: {self.augment})")
+        print(f"  Average {len(self.samples)/len(raw_data):.1f} scanpaths per image")
 
     def __len__(self):
-        return len(self.keys)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        key = self.keys[idx]
-        sample = self.data[key]
+        sample = self.samples[idx]
+        key = sample['key']
 
-        # 安全地加载图像
+        # 加载图像
         img = sample['image']
         if isinstance(img, torch.Tensor):
             image = img.float()
@@ -33,15 +66,8 @@ class Salient360ScanpathDataset(Dataset):
             image = torch.from_numpy(img).float() if isinstance(img, np.ndarray) else torch.tensor(img, dtype=torch.float32)
 
         # 加载显著性图（如果存在）
-        # 兼容两种键名：'saliency_map' 和 'salmap'
         saliency_map = None
-        if 'saliency_map' in sample:
-            sal = sample['saliency_map']
-        elif 'salmap' in sample:  # 兼容数据集中的键名
-            sal = sample['salmap']
-        else:
-            sal = None
-            
+        sal = sample['saliency_map']
         if sal is not None:
             if isinstance(sal, torch.Tensor):
                 saliency_map = sal.float()
@@ -51,32 +77,13 @@ class Salient360ScanpathDataset(Dataset):
             if saliency_map.ndim == 2:
                 saliency_map = saliency_map.unsqueeze(0)
 
-        # 安全地加载扫描路径
-        # scanpaths_2d 可能是 object 类型，需要特殊处理
-        scanpaths = sample['scanpaths_2d']
+        # 使用预先分配的固定路径（不再随机选择）
+        scanpath = sample['scanpath'].copy()
 
-        # 如果是 object 类型，转换为 float32 数组
-        if scanpaths.dtype == np.object_:
-            scanpaths_list = []
-            for i in range(len(scanpaths)):
-                sp = np.array(scanpaths[i], dtype=np.float32)
-                # 如果是 3D 坐标，取前 2 维 (经度, 纬度)
-                if sp.shape[1] == 3:
-                    sp = sp[:, :2]  # 只取前 2 列
-                scanpaths_list.append(sp)
-            scanpaths = np.array(scanpaths_list, dtype=np.float32)
-
-        # 确保是 2D 坐标
-        if scanpaths.shape[2] == 3:
-            scanpaths = scanpaths[:, :, :2]
-
-        scanpath_idx = np.random.randint(0, scanpaths.shape[0])
-        scanpath = scanpaths[scanpath_idx].copy()
-        
         # 只取前2维（经纬度），忽略第3维（时间戳等）
         if scanpath.shape[1] > 2:
             scanpath = scanpath[:, :2]
-        
+
         # 归一化坐标到[0, 1]范围（如果坐标不在[0,1]范围内）
         if scanpath.max() > 1.0 or scanpath.min() < 0.0:
             # 判断是否是经纬度坐标（经度范围大致在-180到180，纬度在-90到90）
@@ -91,7 +98,7 @@ class Salient360ScanpathDataset(Dataset):
                 scanpath_range = scanpath_max - scanpath_min
                 scanpath_range[scanpath_range < 1e-8] = 1.0  # 避免除零
                 scanpath = (scanpath - scanpath_min) / scanpath_range
-        
+
         scanpath = torch.from_numpy(scanpath).float()
 
         # 数据增强（仅训练时）

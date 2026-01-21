@@ -20,6 +20,7 @@ import math
 def compute_teacher_forcing_ratio(epoch, step_idx=None):
     """
     改进的Teacher Forcing策略（方案A：保持更高比例）
+    快速验证版本：适应50个epoch
 
     Args:
         epoch: 当前训练轮次
@@ -27,7 +28,7 @@ def compute_teacher_forcing_ratio(epoch, step_idx=None):
     """
     initial_ratio = 0.9  # 提高初始比例（从0.7到0.9）
     final_ratio = 0.5    # 提高最终比例（从0.3到0.5），保持更强的监督
-    decay_epochs = 150
+    decay_epochs = 50    # 调整为50 epoch
 
     # 指数衰减: ratio = 0.9 * exp(-k * epoch)
     k = -math.log(final_ratio / initial_ratio) / decay_epochs
@@ -201,10 +202,10 @@ def train():
     )
 
     # 早停机制：基于验证位置误差而不是损失
-    # 改进：使用位置误差作为早停指标，更符合主要目标
+    # 快速验证配置：减少patience
     best_val_position_error = float('inf')
     patience_counter = 0
-    early_stopping_patience = 20  # 增加到20，给模型更多机会
+    early_stopping_patience = 10  # 减少到10（从20），快速止损
     best_val_loss = float('inf')  # 仍然记录，但用于保存模型
 
     # 训练日志
@@ -284,8 +285,9 @@ def train():
                 above_boundary * (predicted_scanpaths - boundary_max) ** 2
             )
 
-            # ========== 方案A权重配置：强调精确复制 ==========
-            if epoch <= 80:
+            # ========== 方案A权重配置：强调精确复制（快速验证版本）==========
+            # 调整为50 epoch的训练计划
+            if epoch <= 20:
                 weights = {
                     'reconstruction': 5.0,      # 大幅提高（从1.0到5.0）
                     'kl': 0.001,                # 大幅降低（从0.005到0.001）
@@ -295,8 +297,8 @@ def train():
                     'sequence_alignment': 10.0,  # 大幅提高（从5.0到10.0）
                     'boundary': 0.2
                 }
-            elif epoch <= 150:
-                progress = (epoch - 80) / 70.0
+            elif epoch <= 40:
+                progress = (epoch - 20) / 20.0
                 weights = {
                     'reconstruction': 5.0 + 2.0*progress,  # 逐渐增加到7.0
                     'kl': 0.001,                           # 保持低值
@@ -434,8 +436,8 @@ def train():
                         above_boundary * (predicted_scanpaths - boundary_max) ** 2
                     )
 
-                    # 使用与训练相同的权重（方案A）
-                    if epoch <= 80:
+                    # 使用与训练相同的权重（方案A - 快速验证版本）
+                    if epoch <= 20:
                         weights = {
                             'reconstruction': 5.0,
                             'kl': 0.001,
@@ -445,8 +447,8 @@ def train():
                             'sequence_alignment': 10.0,
                             'boundary': 0.2
                         }
-                    elif epoch <= 150:
-                        progress = (epoch - 80) / 70.0
+                    elif epoch <= 40:
+                        progress = (epoch - 20) / 20.0
                         weights = {
                             'reconstruction': 5.0 + 2.0*progress,
                             'kl': 0.001,
