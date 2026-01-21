@@ -19,18 +19,18 @@ import math
 
 def compute_teacher_forcing_ratio(epoch, step_idx=None):
     """
-    改进的Teacher Forcing策略（方案A：保持更高比例）
+    改进的Teacher Forcing策略（平衡版本）
     快速验证版本：适应50个epoch
 
     Args:
         epoch: 当前训练轮次
         step_idx: 当前序列中的步骤索引（0-29），用于前几步保持高TF
     """
-    initial_ratio = 0.9  # 提高初始比例（从0.7到0.9）
-    final_ratio = 0.5    # 提高最终比例（从0.3到0.5），保持更强的监督
+    initial_ratio = 0.8  # 降低初始比例（从0.9到0.8）
+    final_ratio = 0.2    # 降低最终比例（从0.5到0.2），让模型学会自主生成
     decay_epochs = 50    # 调整为50 epoch
 
-    # 指数衰减: ratio = 0.9 * exp(-k * epoch)
+    # 指数衰减: ratio = 0.8 * exp(-k * epoch)
     k = -math.log(final_ratio / initial_ratio) / decay_epochs
     base_ratio = initial_ratio * math.exp(-k * epoch)
     base_ratio = max(base_ratio, final_ratio)
@@ -38,14 +38,14 @@ def compute_teacher_forcing_ratio(epoch, step_idx=None):
     # 前几步平滑衰减（而不是突变）
     if step_idx is not None:
         if step_idx < 3:
-            # 前3步：额外+0.1（保持接近1.0）
-            return min(base_ratio + 0.1, 0.98)
+            # 前3步：额外+0.15
+            return min(base_ratio + 0.15, 0.95)
         elif step_idx < 6:
-            # 3-6步：额外+0.05
-            return min(base_ratio + 0.05, 0.95)
+            # 3-6步：额外+0.08
+            return min(base_ratio + 0.08, 0.90)
         elif step_idx < 10:
-            # 6-10步：额外+0.02
-            return min(base_ratio + 0.02, 0.92)
+            # 6-10步：额外+0.03
+            return min(base_ratio + 0.03, 0.85)
 
     return base_ratio
 
@@ -136,26 +136,26 @@ def compute_direction_consistency_loss(pred_scanpaths, true_scanpaths):
 
 def compute_sequence_alignment_loss(pred_scanpaths, true_scanpaths):
     """
-    完整序列对齐损失：约束所有30步（方案A - 精确复制）
+    完整序列对齐损失：约束所有30步（方案A - 精确复制，修复版）
 
     关键改进：
-    - 约束所有30步，确保完整序列对齐（大幅改善LEV/DTW/REC）
-    - 所有步骤都给予较高权重，确保整个轨迹精确匹配
-    - 目标：让模型学会"精确复制"真实路径，而不是生成多样化路径
+    - 约束所有30步，确保完整序列对齐
+    - 降低内部权重，避免过度关注前几步导致路径"卡住"
+    - 目标：让模型学会"精确复制"真实路径的完整轨迹
     """
     B, T, D = pred_scanpaths.shape
 
     # 计算所有时间步的点对点距离
     point_distances = torch.norm(pred_scanpaths - true_scanpaths, dim=-1)  # (B, T)
 
-    # 权重配置：所有步骤都保持较高权重，确保完整序列对齐
+    # 权重配置：降低权重，避免过度约束（之前权重太高导致模型"卡住"）
     weights = torch.ones(T, device=pred_scanpaths.device)
-    weights[:5] = 15.0   # 前5步：权重15.0（起始对齐最关键）
-    weights[5:10] = 10.0  # 5-10步：权重10.0
-    weights[10:15] = 8.0 # 10-15步：权重8.0
-    weights[15:20] = 6.0 # 15-20步：权重6.0
-    weights[20:25] = 5.0 # 20-25步：权重5.0
-    weights[25:] = 4.0   # 25-30步：权重4.0（后期也要保持较高权重）
+    weights[:5] = 3.0    # 前5步：权重3.0（从15.0降低）
+    weights[5:10] = 2.5  # 5-10步：权重2.5（从10.0降低）
+    weights[10:15] = 2.0 # 10-15步：权重2.0（从8.0降低）
+    weights[15:20] = 1.5 # 15-20步：权重1.5（从6.0降低）
+    weights[20:25] = 1.3 # 20-25步：权重1.3（从5.0降低）
+    weights[25:] = 1.2   # 25-30步：权重1.2（从4.0降低）
 
     # 计算所有30步的加权平均
     alignment_loss = torch.mean(point_distances * weights.unsqueeze(0))
@@ -285,37 +285,38 @@ def train():
                 above_boundary * (predicted_scanpaths - boundary_max) ** 2
             )
 
-            # ========== 方案A权重配置：强调精确复制（快速验证版本）==========
+            # ========== 方案A权重配置：平衡版本（修复"卡住"问题）==========
             # 调整为50 epoch的训练计划
+            # 关键修复：大幅降低sequence_alignment外部权重，避免过度约束
             if epoch <= 20:
                 weights = {
-                    'reconstruction': 5.0,      # 大幅提高（从1.0到5.0）
-                    'kl': 0.001,                # 大幅降低（从0.005到0.001）
-                    'spatial_coverage': 0.3,    # 降低（从0.5到0.3）
+                    'reconstruction': 3.0,      # 降低（从5.0到3.0）
+                    'kl': 0.002,                # 提高（从0.001到0.002），增加多样性
+                    'spatial_coverage': 0.5,    # 提高（从0.3到0.5）
                     'trajectory_smoothness': 1.0,
                     'direction_consistency': 0.5,
-                    'sequence_alignment': 10.0,  # 大幅提高（从5.0到10.0）
+                    'sequence_alignment': 2.0,  # 大幅降低（从10.0到2.0）
                     'boundary': 0.2
                 }
             elif epoch <= 40:
                 progress = (epoch - 20) / 20.0
                 weights = {
-                    'reconstruction': 5.0 + 2.0*progress,  # 逐渐增加到7.0
-                    'kl': 0.001,                           # 保持低值
-                    'spatial_coverage': 0.3,
+                    'reconstruction': 3.0 + 1.0*progress,  # 逐渐增加到4.0（从7.0降低）
+                    'kl': 0.002,                           # 保持
+                    'spatial_coverage': 0.5,
                     'trajectory_smoothness': 1.0,
                     'direction_consistency': 0.5,
-                    'sequence_alignment': 10.0 + 5.0*progress,  # 逐渐增加到15.0
+                    'sequence_alignment': 2.0 + 1.0*progress,  # 逐渐增加到3.0（从15.0降低）
                     'boundary': 0.2
                 }
             else:
                 weights = {
-                    'reconstruction': 7.0,      # 最终高权重
-                    'kl': 0.001,                # 保持低值
-                    'spatial_coverage': 0.3,
+                    'reconstruction': 4.0,      # 最终权重（从7.0降低）
+                    'kl': 0.002,                # 保持
+                    'spatial_coverage': 0.5,
                     'trajectory_smoothness': 1.0,
                     'direction_consistency': 0.5,
-                    'sequence_alignment': 15.0,  # 最终高权重
+                    'sequence_alignment': 3.0,  # 最终权重（从15.0降低）
                     'boundary': 0.2
                 }
 
@@ -395,8 +396,8 @@ def train():
                     true_scanpaths = batch['scanpath'].to(config.device)
 
                     # 前向传播 - 验证模式
-                    # 方案A：验证时也保持较高的Teacher Forcing（从0.3降到0.5）
-                    val_teacher_forcing = max(0.2, teacher_forcing_ratio * 0.5)
+                    # 平衡版本：验证时使用更低的Teacher Forcing
+                    val_teacher_forcing = max(0.1, teacher_forcing_ratio * 0.3)
                     result = model(images, gt_scanpaths=true_scanpaths,
                                  teacher_forcing_ratio=val_teacher_forcing,
                                  enable_early_stop=False,
@@ -436,36 +437,36 @@ def train():
                         above_boundary * (predicted_scanpaths - boundary_max) ** 2
                     )
 
-                    # 使用与训练相同的权重（方案A - 快速验证版本）
+                    # 使用与训练相同的权重（方案A - 平衡版本）
                     if epoch <= 20:
                         weights = {
-                            'reconstruction': 5.0,
-                            'kl': 0.001,
-                            'spatial_coverage': 0.3,
+                            'reconstruction': 3.0,
+                            'kl': 0.002,
+                            'spatial_coverage': 0.5,
                             'trajectory_smoothness': 1.0,
                             'direction_consistency': 0.5,
-                            'sequence_alignment': 10.0,
+                            'sequence_alignment': 2.0,
                             'boundary': 0.2
                         }
                     elif epoch <= 40:
                         progress = (epoch - 20) / 20.0
                         weights = {
-                            'reconstruction': 5.0 + 2.0*progress,
-                            'kl': 0.001,
-                            'spatial_coverage': 0.3,
+                            'reconstruction': 3.0 + 1.0*progress,
+                            'kl': 0.002,
+                            'spatial_coverage': 0.5,
                             'trajectory_smoothness': 1.0,
                             'direction_consistency': 0.5,
-                            'sequence_alignment': 10.0 + 5.0*progress,
+                            'sequence_alignment': 2.0 + 1.0*progress,
                             'boundary': 0.2
                         }
                     else:
                         weights = {
-                            'reconstruction': 7.0,
-                            'kl': 0.001,
-                            'spatial_coverage': 0.3,
+                            'reconstruction': 4.0,
+                            'kl': 0.002,
+                            'spatial_coverage': 0.5,
                             'trajectory_smoothness': 1.0,
                             'direction_consistency': 0.5,
-                            'sequence_alignment': 15.0,
+                            'sequence_alignment': 3.0,
                             'boundary': 0.2
                         }
 
