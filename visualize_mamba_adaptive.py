@@ -11,13 +11,22 @@ from pathlib import Path
 from config_mamba_adaptive import MambaAdaptiveConfig
 from data.dataset import create_dataloaders
 from models.mamba_adaptive_scanpath import MambaAdaptiveScanpath
-from metrics.scanpath_metrics import compute_all_metrics, compute_dtw
+from metrics.scanpath_metrics import compute_all_metrics, compute_all_metrics_extended, compute_dtw
 import pickle
 
 
-def visualize_scanpath(image, true_scanpath, pred_scanpath, save_path, sample_idx):
-    """可视化单个样本的扫描路径"""
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+def visualize_multiple_scanpaths(image, pred_scanpaths, save_path, sample_idx, max_paths_to_plot=50):
+    """
+    可视化多条生成的扫描路径（类似ScanDMM的方式）
+    
+    Args:
+        image: 输入图像
+        pred_scanpaths: 多条预测路径 (N_paths, T, 2)
+        save_path: 保存路径
+        sample_idx: 样本索引
+        max_paths_to_plot: 最多显示多少条路径（避免过于拥挤）
+    """
+    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
 
     # 转换图像格式
     if isinstance(image, torch.Tensor):
@@ -25,12 +34,7 @@ def visualize_scanpath(image, true_scanpath, pred_scanpath, save_path, sample_id
     
     # 确保图像格式是 (C, H, W)，然后转置为 (H, W, C)
     if image.ndim == 3:
-        # 检查是否是 (H, W, C) 格式（最后一个维度是3或1）
-        if image.shape[-1] in [1, 3]:
-            # 已经是 (H, W, C) 格式，不需要转置
-            pass
-        else:
-            # 是 (C, H, W) 格式，需要转置
+        if image.shape[-1] not in [1, 3]:
             image = np.transpose(image, (1, 2, 0))
     
     # 如果图像是归一化到 [-1, 1]，转换到 [0, 1]
@@ -38,47 +42,60 @@ def visualize_scanpath(image, true_scanpath, pred_scanpath, save_path, sample_id
         image = (image + 1.0) / 2.0
     image = np.clip(image, 0, 1)
 
-    # 左图：真实路径
-    axes[0].imshow(image)
-    axes[0].plot(true_scanpath[:, 0] * image.shape[1],
-                 true_scanpath[:, 1] * image.shape[0],
-                 'g-', linewidth=2, alpha=0.6, label='True Path')
-    axes[0].scatter(true_scanpath[:, 0] * image.shape[1],
-                    true_scanpath[:, 1] * image.shape[0],
-                    c=range(len(true_scanpath)), cmap='Greens', s=100, zorder=5)
-    axes[0].plot(true_scanpath[0, 0] * image.shape[1],
-                 true_scanpath[0, 1] * image.shape[0],
-                 'r*', markersize=20, label='Start')
-    axes[0].set_title(f'Sample {sample_idx} - Ground Truth')
-    axes[0].legend()
-    axes[0].axis('off')
-
-    # 右图：预测路径
-    axes[1].imshow(image)
-    axes[1].plot(pred_scanpath[:, 0] * image.shape[1],
-                 pred_scanpath[:, 1] * image.shape[0],
-                 'b-', linewidth=2, alpha=0.6, label='Predicted Path')
-    axes[1].scatter(pred_scanpath[:, 0] * image.shape[1],
-                    pred_scanpath[:, 1] * image.shape[0],
-                    c=range(len(pred_scanpath)), cmap='Blues', s=100, zorder=5)
-    axes[1].plot(pred_scanpath[0, 0] * image.shape[1],
-                 pred_scanpath[0, 1] * image.shape[0],
-                 'r*', markersize=20, label='Start')
-    axes[1].set_title(f'Sample {sample_idx} - Prediction (Mamba-Adaptive)')
-    axes[1].legend()
-    axes[1].axis('off')
+    # 显示图像
+    ax.imshow(image)
+    
+    # 限制显示的路径数量，避免过于拥挤
+    n_paths_to_plot = min(len(pred_scanpaths), max_paths_to_plot)
+    paths_to_plot = pred_scanpaths[:n_paths_to_plot]
+    
+    # 绘制多条路径，使用不同的颜色和透明度
+    for i, pred_path in enumerate(paths_to_plot):
+        # 使用渐变色和透明度，让多条路径看起来更清晰
+        alpha = 0.4 / np.sqrt(n_paths_to_plot)  # 透明度随路径数量调整
+        color = plt.cm.viridis(i / max(n_paths_to_plot, 1))
+        
+        ax.plot(pred_path[:, 0] * image.shape[1],
+                pred_path[:, 1] * image.shape[0],
+                '-', linewidth=1.5, alpha=alpha, color=color)
+        
+        # 标记起始点
+        if i < 20:  # 只标记前20条的起始点，避免过于拥挤
+            ax.plot(pred_path[0, 0] * image.shape[1],
+                   pred_path[0, 1] * image.shape[0],
+                   'r*', markersize=8, alpha=0.7)
+    
+    # 计算并显示所有路径的平均路径（用粗线标出）
+    if len(pred_scanpaths) > 0:
+        mean_path = np.mean(pred_scanpaths, axis=0)
+        ax.plot(mean_path[:, 0] * image.shape[1],
+                mean_path[:, 1] * image.shape[0],
+                'r-', linewidth=3, alpha=0.9, label=f'Mean Path (n={len(pred_scanpaths)})')
+        ax.plot(mean_path[0, 0] * image.shape[1],
+                mean_path[0, 1] * image.shape[0],
+                'r*', markersize=15, label='Mean Start')
+    
+    ax.set_title(f'Sample {sample_idx} - Generated Scanpaths ({len(pred_scanpaths)} paths, showing {n_paths_to_plot})')
+    ax.legend()
+    ax.axis('off')
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
 
 
-def visualize_test_results(num_samples=10):
-    """可视化测试集结果 - 显示不同的图像样本"""
+def visualize_test_results(num_scanpaths_per_image=200, max_paths_to_plot=50):
+    """
+    可视化所有测试集结果 - 每张图生成多条扫描路径
+    
+    Args:
+        num_scanpaths_per_image: 每张图像生成的扫描路径数量（默认200，类似ScanDMM）
+        max_paths_to_plot: 可视化时最多显示多少条路径（默认50，避免过于拥挤）
+    """
     config = MambaAdaptiveConfig()
 
     # 创建输出目录
-    output_dir = Path('./visualization_results_adaptive')
+    output_dir = Path('./visualization_results_adaptive_multi')
     output_dir.mkdir(exist_ok=True)
 
     print("加载数据...")
@@ -87,6 +104,8 @@ def visualize_test_results(num_samples=10):
         data_dict = pickle.load(f)
     test_data = data_dict['test']
     test_keys = list(test_data.keys())
+    
+    print(f"测试集共有 {len(test_keys)} 个图像")
     
     # 创建测试数据集，用于获取预处理后的数据
     from data.dataset import Salient360ScanpathDataset
@@ -107,38 +126,35 @@ def visualize_test_results(num_samples=10):
 
     print(f"成功加载模型 (Epoch {checkpoint['epoch']})")
     print(f"最佳损失: {checkpoint.get('best_loss', 'N/A')}")
+    print(f"每张图像将生成 {num_scanpaths_per_image} 条扫描路径")
 
-    # 可视化样本
-    print(f"\n开始可视化 {num_samples} 个不同的测试样本...")
+    # 遍历所有测试样本
+    print(f"\n开始处理所有测试样本（共 {len(test_keys)} 个）...")
 
-    total_error_best = 0  # 与最佳匹配的误差
-    total_error_avg = 0   # 与所有路径的平均误差
-    total_lev_best = 0    # 最佳匹配的LEV
-    total_lev_avg = 0     # 平均LEV
-    total_dtw_best = 0    # 最佳匹配的DTW
-    total_dtw_avg = 0     # 平均DTW
-    total_rec_best = 0    # 最佳匹配的REC
-    total_rec_avg = 0     # 平均REC
-
-    # 确保选择不同的样本（均匀分布）
-    sample_indices = np.linspace(0, len(test_keys)-1, num_samples, dtype=int)
+    # 用于累积所有样本的平均指标
+    all_best_levs = []  # 每个样本的最佳LEV
+    all_avg_levs = []   # 每个样本的平均LEV
+    all_best_dtws = []  # 每个样本的最佳DTW
+    all_avg_dtws = []   # 每个样本的平均DTW
+    all_best_recs = []  # 每个样本的最佳REC
+    all_avg_recs = []   # 每个样本的平均REC
 
     with torch.no_grad():
-        for sample_count, idx in enumerate(sample_indices):
-            key = test_keys[idx]
+        for sample_idx, key in enumerate(test_keys):
             sample = test_data[key]
+            
+            print(f"\n处理样本 {sample_idx + 1}/{len(test_keys)}: {key}")
             
             # 加载图像
             img = sample['image']
             if isinstance(img, torch.Tensor):
                 image_tensor = img.float().unsqueeze(0).to(config.device)
-                # 保存原始tensor用于可视化函数（函数内部会处理格式转换）
-                image_np = img  # 保持为tensor，让visualize_scanpath函数处理
+                image_np = img  # 保持为tensor
             else:
                 image_tensor = torch.from_numpy(img).float().unsqueeze(0).to(config.device)
-                image_np = torch.from_numpy(img).float()  # 转换为tensor，保持(C, H, W)格式
+                image_np = torch.from_numpy(img).float()
 
-            # 处理扫描路径数据
+            # 处理真实扫描路径数据（用于评估）
             scanpaths_2d = sample['scanpaths_2d']
             if scanpaths_2d.dtype == np.object_:
                 scanpaths_list = []
@@ -178,94 +194,142 @@ def visualize_test_results(num_samples=10):
                 normalized_paths.append(sp)
             all_true_scanpaths = np.array(normalized_paths)
 
-            # 推理模式预测 - 不使用Teacher Forcing
-            # 改进：使用合理的采样温度，避免过度分散
-            # 温度>1.0会增加采样方差，但过高的温度会导致预测不稳定
-            temperature = 1.0  # 使用标准温度1.0，让模型输出更稳定
-            # 显式设置enable_early_stop=False，确保返回3个值
-            result = model(image_tensor, gt_scanpaths=None, teacher_forcing_ratio=0.0, 
-                          temperature=temperature, enable_early_stop=False)
-            # 安全解包：无论返回3个还是5个值，都只取前3个
-            pred_scanpath = result[0]
-            _ = result[1]  # mus (不需要使用)
-            _ = result[2]  # logvars (不需要使用)
-            pred_scanpath_np = pred_scanpath[0].cpu().numpy()
+            # ========== 生成多条扫描路径（类似ScanDMM） ==========
+            print(f"  生成 {num_scanpaths_per_image} 条扫描路径...")
+            all_pred_scanpaths = []
+            
+            # 为了增加多样性，可以在每次生成时使用略微不同的温度
+            for path_idx in range(num_scanpaths_per_image):
+                # 可以使用略微不同的温度来增加多样性
+                # temperature在1.0附近轻微波动，增加采样多样性
+                temperature = 1.0 + np.random.uniform(-0.1, 0.1)  # 轻微变化
+                
+                result = model(image_tensor, gt_scanpaths=None, teacher_forcing_ratio=0.0, 
+                              temperature=temperature, enable_early_stop=False)
+                
+                pred_scanpath = result[0]
+                pred_scanpath_np = pred_scanpath[0].cpu().numpy()
+                all_pred_scanpaths.append(pred_scanpath_np)
+                
+                # 进度提示
+                if (path_idx + 1) % 50 == 0:
+                    print(f"    已生成 {path_idx + 1}/{num_scanpaths_per_image} 条路径")
+            
+            all_pred_scanpaths = np.array(all_pred_scanpaths)  # (N_paths, T, 2)
+            print(f"  完成生成，共 {len(all_pred_scanpaths)} 条路径")
 
-            # 与所有真实路径计算距离，选择最佳匹配
-            num_paths = len(all_true_scanpaths)
-            dtw_scores = []
-            for true_sp in all_true_scanpaths:
-                dtw_val = compute_dtw(pred_scanpath_np, true_sp, image_size=config.image_size)
-                dtw_scores.append(dtw_val)
+            # ========== 计算评估指标（与所有真实路径比较） ==========
+            # 对每条预测路径，找到最佳匹配的真实路径
+            best_levs = []
+            best_dtws = []
+            best_recs = []
             
-            best_idx = np.argmin(dtw_scores)
-            best_true_scanpath = all_true_scanpaths[best_idx]
-            
-            # 计算最佳匹配的指标
-            metrics_best = compute_all_metrics(pred_scanpath_np, best_true_scanpath, 
-                                               image_size=config.image_size,
-                                               grid_size=32)
-            error_best = np.linalg.norm(pred_scanpath_np - best_true_scanpath, axis=1).mean()
-            
-            # 计算平均指标（与所有路径的平均值）
-            metrics_all = []
-            for true_sp in all_true_scanpaths:
-                metrics_all.append(compute_all_metrics(pred_scanpath_np, true_sp, 
-                                                      image_size=config.image_size,
-                                                      grid_size=32))
-            metrics_avg = {
-                'LEV': np.mean([m['LEV'] for m in metrics_all]),
-                'DTW': np.mean([m['DTW'] for m in metrics_all]),
-                'REC': np.mean([m['REC'] for m in metrics_all])
-            }
-            error_avg = np.mean([np.linalg.norm(pred_scanpath_np - true_sp, axis=1).mean() 
-                                for true_sp in all_true_scanpaths])
+            avg_levs = []
+            avg_dtws = []
+            avg_recs = []
+
+            for pred_path in all_pred_scanpaths:
+                # 计算与所有真实路径的指标（使用扩展指标）
+                metrics_list = []
+                for true_sp in all_true_scanpaths:
+                    # 获取显著性图（如果有）
+                    saliency = sample.get('saliency_map')
+                    if saliency is not None and isinstance(saliency, torch.Tensor):
+                        saliency = saliency.squeeze().cpu().numpy()
+
+                    metrics = compute_all_metrics_extended(pred_path, true_sp,
+                                                          saliency_map=saliency,
+                                                          image_size=config.image_size,
+                                                          grid_size=32)
+                    metrics_list.append(metrics)
+
+                # 最佳匹配（最小DTW）
+                best_idx = np.argmin([m['DTW'] for m in metrics_list])
+                best_metrics = metrics_list[best_idx]
+                best_levs.append(best_metrics['LEV'])
+                best_dtws.append(best_metrics['DTW'])
+                best_recs.append(best_metrics['REC'])
+
+                # 平均指标
+                avg_levs.append(np.mean([m['LEV'] for m in metrics_list]))
+                avg_dtws.append(np.mean([m['DTW'] for m in metrics_list]))
+                avg_recs.append(np.mean([m['REC'] for m in metrics_list]))
+
+            # 计算该样本的平均指标（所有预测路径的平均值）
+            sample_best_lev = np.mean(best_levs)
+            sample_avg_lev = np.mean(avg_levs)
+            sample_best_dtw = np.mean(best_dtws)
+            sample_avg_dtw = np.mean(avg_dtws)
+            sample_best_rec = np.mean(best_recs)
+            sample_avg_rec = np.mean(avg_recs)
+
+            # 计算新增指标（使用最佳匹配的真实路径）
+            best_true_sp = all_true_scanpaths[best_idx]
+            saliency = sample.get('saliency_map')
+            if saliency is not None and isinstance(saliency, torch.Tensor):
+                saliency = saliency.squeeze().cpu().numpy()
+
+            extended_metrics = compute_all_metrics_extended(
+                all_pred_scanpaths[0],  # 使用第一条预测路径
+                best_true_sp,
+                saliency_map=saliency,
+                image_size=config.image_size
+            )
 
             # 累积指标
-            total_error_best += error_best
-            total_error_avg += error_avg
-            total_lev_best += metrics_best['LEV']
-            total_lev_avg += metrics_avg['LEV']
-            total_dtw_best += metrics_best['DTW']
-            total_dtw_avg += metrics_avg['DTW']
-            total_rec_best += metrics_best['REC']
-            total_rec_avg += metrics_avg['REC']
+            all_best_levs.append(sample_best_lev)
+            all_avg_levs.append(sample_avg_lev)
+            all_best_dtws.append(sample_best_dtw)
+            all_avg_dtws.append(sample_avg_dtw)
+            all_best_recs.append(sample_best_rec)
+            all_avg_recs.append(sample_avg_rec)
 
-            # 可视化（使用最佳匹配的真实路径）
-            save_path = output_dir / f'sample_{sample_count:03d}_idx{idx}.png'
-            visualize_scanpath(image_np, best_true_scanpath, pred_scanpath_np, save_path, sample_count)
+            # ========== 可视化多条生成的路径 ==========
+            save_path = output_dir / f'sample_{sample_idx:03d}_{key}.png'
+            visualize_multiple_scanpaths(image_np, all_pred_scanpaths, save_path, 
+                                        sample_idx, max_paths_to_plot=max_paths_to_plot)
 
-            print(f"样本 {sample_count} (数据集索引 {idx}, 共 {num_paths} 条真实路径):")
-            print(f"  最佳匹配 (Best Match):")
-            print(f"    位置误差 = {error_best:.4f}")
-            print(f"    LEV = {metrics_best['LEV']:.2f}, DTW = {metrics_best['DTW']:.4f}, REC = {metrics_best['REC']:.4f}")
-            print(f"  平均指标 (Average over {num_paths} paths):")
-            print(f"    位置误差 = {error_avg:.4f}")
-            print(f"    LEV = {metrics_avg['LEV']:.2f}, DTW = {metrics_avg['DTW']:.4f}, REC = {metrics_avg['REC']:.4f}")
+            # 打印统计信息
+            print(f"  评估结果（基于 {len(all_pred_scanpaths)} 条预测路径）:")
+            print(f"    最佳匹配平均值:")
+            print(f"      LEV = {sample_best_lev:.2f}, DTW = {sample_best_dtw:.4f}, REC = {sample_best_rec:.4f}")
+            print(f"    与所有真实路径的平均值:")
+            print(f"      LEV = {sample_avg_lev:.2f}, DTW = {sample_avg_dtw:.4f}, REC = {sample_avg_rec:.4f}")
+            print(f"    新增指标（最佳匹配）:")
+            print(f"      SIM = {extended_metrics.get('SIM', 0):.4f} (越小越好)")
+            print(f"      MM_Vector = {extended_metrics.get('MM_Vector', 0):.4f} (方向相似度, 0-1)")
+            print(f"      MM_Length = {extended_metrics.get('MM_Length', 0):.4f} (步长相似度, 0-1)")
+            print(f"      MM_Position = {extended_metrics.get('MM_Position', 0):.4f} (位置相似度, 0-1)")
+            if 'NSS' in extended_metrics:
+                print(f"      NSS = {extended_metrics['NSS']:.4f} (显著性得分)")
+                print(f"      CC = {extended_metrics['CC']:.4f} (相关系数, 0-1)")
+                print(f"      SalCoverage = {extended_metrics['SalCoverage']:.4f} (显著性覆盖率, 0-1)")
 
-            # 打印预测统计
-            pred_mean = pred_scanpath_np.mean(axis=0)
-            pred_std = pred_scanpath_np.std(axis=0)
-            print(f"  预测路径均值: x={pred_mean[0]:.4f}, y={pred_mean[1]:.4f}")
-            print(f"  预测路径标准差: x={pred_std[0]:.6f}, y={pred_std[1]:.6f}")
+            # 计算生成路径的统计信息
+            all_paths_flat = all_pred_scanpaths.reshape(-1, 2)
+            pred_mean = all_paths_flat.mean(axis=0)
+            pred_std = all_paths_flat.std(axis=0)
+            print(f"    生成路径统计:")
+            print(f"      均值: x={pred_mean[0]:.4f}, y={pred_mean[1]:.4f}")
+            print(f"      标准差: x={pred_std[0]:.4f}, y={pred_std[1]:.4f}")
 
-    # 打印平均指标
+    # 打印最终的平均指标
     print(f"\n{'='*60}")
-    print(f"平均评估指标 (基于 {num_samples} 个样本):")
+    print(f"最终评估指标 (基于所有 {len(test_keys)} 个测试样本)")
+    print(f"每张图像生成 {num_scanpaths_per_image} 条扫描路径")
     print(f"{'='*60}")
-    print(f"\n【最佳匹配 (Best Match)】- 与最相似的真实路径比较:")
-    print(f"  位置误差 (Position Error): {total_error_best / num_samples:.4f}")
-    print(f"  LEV (Levenshtein Distance): {total_lev_best / num_samples:.2f} (越小越好)")
-    print(f"  DTW (Dynamic Time Warping): {total_dtw_best / num_samples:.4f} (越小越好)")
-    print(f"  REC (Recurrence/IoU): {total_rec_best / num_samples:.4f} (越大越好)")
-    print(f"\n【平均指标 (Average)】- 与所有真实路径的平均值:")
-    print(f"  位置误差 (Position Error): {total_error_avg / num_samples:.4f}")
-    print(f"  LEV (Levenshtein Distance): {total_lev_avg / num_samples:.2f} (越小越好)")
-    print(f"  DTW (Dynamic Time Warping): {total_dtw_avg / num_samples:.4f} (越小越好)")
-    print(f"  REC (Recurrence/IoU): {total_rec_avg / num_samples:.4f} (越大越好)")
+    print(f"\n【最佳匹配 (Best Match)】- 每条预测路径与最相似的真实路径比较:")
+    print(f"  平均 LEV (Levenshtein Distance): {np.mean(all_best_levs):.2f} ± {np.std(all_best_levs):.2f} (越小越好)")
+    print(f"  平均 DTW (Dynamic Time Warping): {np.mean(all_best_dtws):.4f} ± {np.std(all_best_dtws):.4f} (越小越好)")
+    print(f"  平均 REC (Recurrence/IoU): {np.mean(all_best_recs):.4f} ± {np.std(all_best_recs):.4f} (越大越好)")
+    print(f"\n【平均指标 (Average)】- 每条预测路径与所有真实路径的平均值:")
+    print(f"  平均 LEV (Levenshtein Distance): {np.mean(all_avg_levs):.2f} ± {np.std(all_avg_levs):.2f} (越小越好)")
+    print(f"  平均 DTW (Dynamic Time Warping): {np.mean(all_avg_dtws):.4f} ± {np.std(all_avg_dtws):.4f} (越小越好)")
+    print(f"  平均 REC (Recurrence/IoU): {np.mean(all_avg_recs):.4f} ± {np.std(all_avg_recs):.4f} (越大越好)")
     print(f"{'='*60}")
     print(f"\n可视化结果保存在: {output_dir.absolute()}")
 
 
 if __name__ == '__main__':
-    visualize_test_results(num_samples=10)
+    # 每张图像生成200条扫描路径（类似ScanDMM），最多显示50条路径
+    visualize_test_results(num_scanpaths_per_image=200, max_paths_to_plot=50)
