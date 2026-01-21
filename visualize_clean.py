@@ -69,7 +69,22 @@ def visualize_clean_grid(num_samples=None, num_paths_per_sample=20):
         sample = test_dataset[first_sample_idx]
 
         image = sample['image'].unsqueeze(0).to(device)
-        image_np = sample['image'].permute(1, 2, 0).cpu().numpy()
+
+        # 处理图像显示：确保正确的值范围和对比度
+        image_for_display = sample['image'].permute(1, 2, 0).cpu().numpy()
+
+        # 检查图像值范围并正确归一化到[0, 1]用于显示
+        if image_for_display.min() < 0:
+            # 如果图像值在[-1, 1]范围（归一化后的），转换到[0, 1]
+            image_for_display = (image_for_display + 1.0) / 2.0
+        elif image_for_display.max() > 1.0:
+            # 如果图像值在[0, 255]范围，归一化到[0, 1]
+            image_for_display = image_for_display / 255.0
+
+        # 确保值在[0, 1]范围内
+        image_for_display = np.clip(image_for_display, 0.0, 1.0)
+
+        image_np = image_for_display
 
         # 生成多条路径
         pred_paths = []
@@ -95,8 +110,8 @@ def visualize_clean_grid(num_samples=None, num_paths_per_sample=20):
             col = path_idx % cols
             ax = axes[row, col]
 
-            # 显示图像
-            ax.imshow(image_np)
+            # 显示图像（明确指定值范围确保正确对比度）
+            ax.imshow(image_np, vmin=0.0, vmax=1.0)
 
             # 绘制路径
             pred_path = pred_paths[path_idx]

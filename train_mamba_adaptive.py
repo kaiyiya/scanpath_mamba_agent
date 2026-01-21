@@ -164,6 +164,86 @@ def compute_sequence_alignment_loss(pred_scanpaths, true_scanpaths):
     return alignment_loss
 
 
+def compute_motion_consistency_loss(pred_scanpaths, true_scanpaths):
+    """
+    运动一致性损失（方案C-改进版）：选择性约束方向和步长
+
+    改进：只约束"合理"的运动，避免过度约束导致N形路径
+
+    包含两个部分：
+    1. 方向相似度损失：使用余弦相似度约束运动方向
+    2. 步长相似度损失：使用MSE约束运动步长
+
+    关键改进：
+    - 只对步长在合理范围内的运动进行约束
+    - 对于过小的步长（< 0.01），不约束方向（避免噪声）
+    - 对于过大的步长（> 0.3），降低约束权重（允许探索）
+
+    Args:
+        pred_scanpaths: 预测路径 (B, T, 2)
+        true_scanpaths: 真实路径 (B, T, 2)
+
+    Returns:
+        motion_loss: 运动一致性损失标量
+    """
+    # 计算运动向量（相邻点之间的位移）
+    pred_motions = pred_scanpaths[:, 1:] - pred_scanpaths[:, :-1]  # (B, T-1, 2)
+    true_motions = true_scanpaths[:, 1:] - true_scanpaths[:, :-1]  # (B, T-1, 2)
+
+    # 计算步长
+    pred_step_lengths = torch.norm(pred_motions, p=2, dim=-1)  # (B, T-1)
+    true_step_lengths = torch.norm(true_motions, p=2, dim=-1)  # (B, T-1)
+
+    # 1. 方向相似度损失（余弦相似度）- 选择性约束
+    # 归一化运动向量得到方向
+    pred_directions = F.normalize(pred_motions, p=2, dim=-1, eps=1e-8)  # (B, T-1, 2)
+    true_directions = F.normalize(true_motions, p=2, dim=-1, eps=1e-8)  # (B, T-1, 2)
+
+    # 计算余弦相似度
+    cosine_similarity = (pred_directions * true_directions).sum(dim=-1)  # (B, T-1)
+
+    # 选择性约束：只对合理步长的运动约束方向
+    # 步长太小（< 0.01）：可能是噪声，不约束
+    # 步长太大（> 0.3）：可能是探索性跳跃，降低约束
+    step_mask = (true_step_lengths > 0.01) & (true_step_lengths < 0.3)  # (B, T-1)
+
+    # 对于大步长，使用较小的权重
+    large_step_mask = true_step_lengths >= 0.3
+    large_step_weight = 0.3  # 大步长的方向约束权重降低到30%
+
+    # 计算加权方向损失
+    direction_loss_per_step = 1.0 - cosine_similarity  # (B, T-1)
+    direction_loss_weighted = torch.where(
+        step_mask,
+        direction_loss_per_step,  # 正常步长：全权重
+        torch.where(
+            large_step_mask,
+            direction_loss_per_step * large_step_weight,  # 大步长：降低权重
+            torch.zeros_like(direction_loss_per_step)  # 小步长：不约束
+        )
+    )
+    direction_loss = direction_loss_weighted.mean()
+
+    # 2. 步长相似度损失（MSE）- 使用相对误差而不是绝对误差
+    # 改进：使用相对误差，避免对大步长过度惩罚
+    # 相对误差 = |pred - true| / (true + eps)
+    step_relative_error = torch.abs(pred_step_lengths - true_step_lengths) / (true_step_lengths + 1e-6)
+
+    # 只对合理步长约束
+    step_loss_per_step = step_relative_error ** 2
+    step_loss_weighted = torch.where(
+        step_mask,
+        step_loss_per_step,
+        torch.zeros_like(step_loss_per_step)
+    )
+    step_length_loss = step_loss_weighted.mean()
+
+    # 3. 组合损失（方向和步长同等重要）
+    motion_loss = direction_loss + step_length_loss
+
+    return motion_loss
+
+
 # 已移除 compute_batch_diversity_loss 函数
 # 方案A：专注于精确复制路径，不鼓励多样性
 
@@ -276,7 +356,10 @@ def train():
             # 6. 序列对齐损失（约束所有30步，大幅提高权重）
             sequence_alignment_loss = compute_sequence_alignment_loss(predicted_scanpaths, true_scanpaths)
 
-            # 7. 边界约束
+            # 7. 运动一致性损失（方案C：显式约束方向和步长）
+            motion_consistency_loss = compute_motion_consistency_loss(predicted_scanpaths, true_scanpaths)
+
+            # 8. 边界约束
             boundary_min = 0.02
             boundary_max = 0.98
             below_boundary = (predicted_scanpaths < boundary_min).float()
@@ -286,12 +369,13 @@ def train():
                 above_boundary * (predicted_scanpaths - boundary_max) ** 2
             )
 
-            # ========== 方案A权重配置：改进版（解决覆盖不足问题）==========
+            # ========== 方案C-改进版权重配置：大幅降低motion_consistency权重 ==========
             # 调整为50 epoch的训练计划
             # 关键改进：
             # 1. 大幅提高spatial_coverage权重，鼓励探索整个图像
             # 2. 降低trajectory_smoothness权重，允许更大的步长
             # 3. 增加多样性，减少过拟合
+            # 4. motion_consistency权重降低到0.1-0.3（从1.0-1.5），避免过度约束
             if epoch <= 20:
                 weights = {
                     'reconstruction': 2.0,  # 降低（从3.0到2.0），给其他损失更多空间
@@ -300,6 +384,7 @@ def train():
                     'trajectory_smoothness': 0.3,  # 大幅降低（从1.0到0.3），允许大步长
                     'direction_consistency': 0.3,  # 降低（从0.5到0.3）
                     'sequence_alignment': 1.5,  # 降低（从2.0到1.5）
+                    'motion_consistency': 0.1,  # 大幅降低（从1.0到0.1），作为辅助约束
                     'boundary': 0.2
                 }
             elif epoch <= 40:
@@ -311,6 +396,7 @@ def train():
                     'trajectory_smoothness': 0.3,
                     'direction_consistency': 0.3,
                     'sequence_alignment': 1.5 + 0.5 * progress,  # 逐渐增加到2.0
+                    'motion_consistency': 0.1 + 0.2 * progress,  # 逐渐增加到0.3（从0.1）
                     'boundary': 0.2
                 }
             else:
@@ -321,10 +407,11 @@ def train():
                     'trajectory_smoothness': 0.3,  # 保持低
                     'direction_consistency': 0.3,
                     'sequence_alignment': 2.0,
+                    'motion_consistency': 0.3,  # 最终权重（从1.5降低到0.3）
                     'boundary': 0.2
                 }
 
-            # 计算总损失（移除batch_diversity项）
+            # 计算总损失（添加motion_consistency项）
             loss = (
                     weights['reconstruction'] * reconstruction_loss +
                     weights['kl'] * kl_loss +
@@ -332,6 +419,7 @@ def train():
                     weights['trajectory_smoothness'] * trajectory_smoothness_loss +
                     weights['direction_consistency'] * direction_consistency_loss +
                     weights['sequence_alignment'] * sequence_alignment_loss +
+                    weights['motion_consistency'] * motion_consistency_loss +
                     weights['boundary'] * boundary_penalty
             )
 
