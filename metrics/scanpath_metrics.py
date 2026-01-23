@@ -1,71 +1,103 @@
 """
-扫描路径评估指标
-实现LEV, DTW, REC三个常用指标
-以及新增的更适合眼动路径的指标：SIM, CC, NSS, AUC
+扫描路径评估指标 - 使用官方metrics.py的标准实现
+整合了LEV, DTW, REC, ScanMatch, TDE, MultiMatch等指标
 """
 import numpy as np
+from typing import Tuple, Optional
+import editdistance
+from fastdtw import fastdtw
 from scipy.spatial.distance import euclidean
 from scipy.stats import pearsonr
-from typing import Tuple
+
+
+def scanpath_to_string(scanpath, height_width, Xbins, Ybins, Tbins):
+    """
+    将扫描路径转换为字符串表示（用于LEV和ScanMatch）
+
+    Args:
+        scanpath: (T, 2) numpy array，像素坐标
+        height_width: ((0, height), (0, width)) 图像尺寸
+        Xbins: X方向的bin数量
+        Ybins: Y方向的bin数量
+        Tbins: 时间bin（0表示不使用时间信息）
+
+    Returns:
+        string: 字符串表示
+        num: 数值表示列表
+    """
+    if Tbins != 0:
+        try:
+            assert scanpath.shape[1] == 3
+        except Exception as x:
+            print("Temporal information doesn't exist.")
+
+    height = height_width[0][0]
+    width = height_width[1][1]
+    height_step, width_step = height // Ybins, width // Xbins
+    string = ''
+    num = list()
+
+    for i in range(scanpath.shape[0]):
+        fixation = scanpath[i].astype(np.int32)
+        xbin = min(Xbins-1, fixation[0] // width_step)
+        xbin = max(0, fixation[0] // width_step)
+        ybin = min(Ybins-1, ((height - fixation[1]) // height_step))
+        ybin = max(0, ((height - fixation[1]) // height_step))
+        corrs_x = chr(65 + xbin)
+        corrs_y = chr(97 + ybin)
+        T = 1
+        if Tbins:
+            T = fixation[2] // Tbins
+        for t in range(T):
+            string += (corrs_y + corrs_x)
+            num += [(ybin * (Xbins-1)) + xbin - 1]
+
+    return string, num
 
 
 def compute_lev(pred_scanpath: np.ndarray, true_scanpath: np.ndarray,
-                image_size: Tuple[int, int] = (256, 512), grid_size: int = 8,
-                distance_threshold: float = 0.20) -> float:
+                image_size: Tuple[int, int] = (256, 512),
+                Xbins: int = 12, Ybins: int = 8) -> float:
     """
-    计算Levenshtein Distance (编辑距离) - 使用软匹配
+    计算Levenshtein Distance (编辑距离) - 官方实现
 
-    关键改进：不再使用网格离散化，而是基于连续距离的软匹配
-    如果两个点的欧氏距离小于阈值，则认为匹配，否则需要编辑
+    使用网格离散化方法，将连续坐标映射到离散网格
 
     Args:
         pred_scanpath: 预测路径 (T, 2)，坐标范围[0, 1]，格式为(x, y)
         true_scanpath: 真实路径 (T, 2)，坐标范围[0, 1]，格式为(x, y)
-        image_size: 图像尺寸 (height, width)，用于显示（不再用于离散化）
-        grid_size: 保留参数以兼容旧代码，但不再使用
-        distance_threshold: 距离阈值，小于此值认为匹配（默认0.20，约为图像对角线的20%）
-                           - 0.15: 太严格，只有position_error<0.2的样本能得到好的LEV
-                           - 0.20: 更合理，适合position_error在0.2-0.3的模型
+        image_size: 图像尺寸 (height, width)
+        Xbins: X方向的bin数量（默认12）
+        Ybins: Y方向的bin数量（默认8）
 
     Returns:
         编辑距离（越小越好）
     """
+    h, w = image_size
+    height_width = ((0, h), (0, w))
 
-    # 计算编辑距离（动态规划），使用软匹配
-    m, n = len(pred_scanpath), len(true_scanpath)
+    # 转换为像素坐标
+    pred_pixels = pred_scanpath.copy()
+    pred_pixels[:, 0] = np.clip(pred_pixels[:, 0] * w, 0, w - 1)
+    pred_pixels[:, 1] = np.clip(pred_pixels[:, 1] * h, 0, h - 1)
 
-    if m == 0 or n == 0:
-        return max(m, n)
+    true_pixels = true_scanpath.copy()
+    true_pixels[:, 0] = np.clip(true_pixels[:, 0] * w, 0, w - 1)
+    true_pixels[:, 1] = np.clip(true_pixels[:, 1] * h, 0, h - 1)
 
-    # 使用滚动数组优化内存（只保留两行）
-    prev_row = np.arange(n + 1, dtype=np.float32)
-    curr_row = np.zeros(n + 1, dtype=np.float32)
+    # 转换为字符串
+    P, P_num = scanpath_to_string(pred_pixels, height_width, Xbins, Ybins, 0)
+    Q, Q_num = scanpath_to_string(true_pixels, height_width, Xbins, Ybins, 0)
 
-    for i in range(1, m + 1):
-        curr_row[0] = i
-        for j in range(1, n + 1):
-            # 计算两点之间的欧氏距离
-            dist = np.linalg.norm(pred_scanpath[i - 1] - true_scanpath[j - 1])
-
-            # 软匹配：如果距离小于阈值，认为匹配
-            if dist < distance_threshold:
-                curr_row[j] = prev_row[j - 1]  # 匹配，不需要编辑
-            else:
-                curr_row[j] = 1 + min(
-                    prev_row[j],      # 删除
-                    curr_row[j - 1],  # 插入
-                    prev_row[j - 1]   # 替换
-                )
-        prev_row, curr_row = curr_row, prev_row
-
-    return float(prev_row[n])
+    return editdistance.eval(P, Q)
 
 
 def compute_dtw(pred_scanpath: np.ndarray, true_scanpath: np.ndarray,
                 image_size: Tuple[int, int] = (256, 512)) -> float:
     """
-    计算Dynamic Time Warping距离
-    使用像素坐标计算距离
+    计算Dynamic Time Warping距离 - 官方实现
+
+    使用fastdtw库计算，速度更快
 
     Args:
         pred_scanpath: 预测路径 (T1, 2)，坐标范围[0, 1]，格式为(x, y)
@@ -79,117 +111,262 @@ def compute_dtw(pred_scanpath: np.ndarray, true_scanpath: np.ndarray,
 
     # 转换为像素坐标
     pred_pixels = pred_scanpath.copy()
-    pred_pixels[:, 0] *= w  # x坐标
-    pred_pixels[:, 1] *= h  # y坐标
+    pred_pixels[:, 0] = pred_pixels[:, 0] * w
+    pred_pixels[:, 1] = pred_pixels[:, 1] * h
 
     true_pixels = true_scanpath.copy()
-    true_pixels[:, 0] *= w
-    true_pixels[:, 1] *= h
+    true_pixels[:, 0] = true_pixels[:, 0] * w
+    true_pixels[:, 1] = true_pixels[:, 1] * h
 
-    m, n = len(pred_pixels), len(true_pixels)
+    # 使用fastdtw计算
+    dist, _ = fastdtw(pred_pixels, true_pixels, dist=euclidean)
 
-    # 计算距离矩阵
-    dist_matrix = np.zeros((m, n))
-    for i in range(m):
-        for j in range(n):
-            dist_matrix[i, j] = euclidean(pred_pixels[i], true_pixels[j])
-
-    # DTW动态规划
-    dtw_matrix = np.full((m + 1, n + 1), np.inf)
-    dtw_matrix[0, 0] = 0
-
-    for i in range(1, m + 1):
-        for j in range(1, n + 1):
-            cost = dist_matrix[i - 1, j - 1]
-            dtw_matrix[i, j] = cost + min(
-                dtw_matrix[i - 1, j],  # 插入
-                dtw_matrix[i, j - 1],  # 删除
-                dtw_matrix[i - 1, j - 1]  # 匹配
-            )
-
-    return dtw_matrix[m, n]
+    return dist
 
 
 def compute_rec(pred_scanpath: np.ndarray, true_scanpath: np.ndarray,
+                threshold: float = 12.0, image_size: Tuple[int, int] = (256, 512)) -> float:
+    """
+    计算Recurrence (交叉重现率) - 官方实现
+
+    基于论文: https://link.springer.com/content/pdf/10.3758%2Fs13428-014-0550-3.pdf
+
+    Args:
+        pred_scanpath: 预测路径 (T, 2)，坐标范围[0, 1]，格式为(x, y)
+        true_scanpath: 真实路径 (T, 2)，坐标范围[0, 1]，格式为(x, y)
+        threshold: 距离阈值（像素），默认12像素（2*6）
+        image_size: 图像尺寸 (height, width)
+
+    Returns:
+        重现率百分比（0-100，越大越好）
+    """
+    h, w = image_size
+
+    # 转换为像素坐标
+    P = pred_scanpath.copy()
+    P[:, 0] = P[:, 0] * w
+    P[:, 1] = P[:, 1] * h
+    P = P.astype(np.float32)
+
+    Q = true_scanpath.copy()
+    Q[:, 0] = Q[:, 0] * w
+    Q[:, 1] = Q[:, 1] * h
+    Q = Q.astype(np.float32)
+
+    # 截断到相同长度
+    min_len = min(P.shape[0], Q.shape[0])
+    P = P[:min_len, :2]
+    Q = Q[:min_len, :2]
+
+    # 计算交叉重现矩阵
+    def _C(P, Q, threshold):
+        assert P.shape == Q.shape
+        shape = P.shape[0]
+        c = np.zeros((shape, shape))
+
+        for i in range(shape):
+            for j in range(shape):
+                if euclidean(P[i], Q[j]) < threshold:
+                    c[i, j] = 1
+        return c
+
+    c = _C(P, Q, threshold)
+    R = np.triu(c, 1).sum()
+
+    return 100 * (2 * R) / (min_len * (min_len - 1)) if min_len > 1 else 0.0
+
+
+def compute_tde(pred_scanpath: np.ndarray, true_scanpath: np.ndarray,
+                k: int = 2, distance_mode: str = 'Mean',
                 image_size: Tuple[int, int] = (256, 512)) -> float:
     """
-    计算Recurrence (重现率)
-    返回访问的唯一网格数量的比率
+    计算Time-Delay Embedding距离
+
+    参考: https://arxiv.org/abs/1802.02534
+    Metric: Simulating Human Saccadic Scanpaths on Natural Images
 
     Args:
-        pred_scanpath: 预测路径 (T, 2)，坐标范围[0, 1]，格式为(x, y)
-        true_scanpath: 真实路径 (T, 2)，坐标范围[0, 1]，格式为(x, y)
-        image_size: 图像尺寸 (height, width)
+        pred_scanpath: 预测路径 (T1, 2)
+        true_scanpath: 真实路径 (T2, 2)
+        k: 时间嵌入向量维度
+        distance_mode: 'Mean' 或 'Hausdorff'
+        image_size: 图像尺寸
 
     Returns:
-        重现率（越大越好）
+        TDE距离（越小越好）
     """
-    # 使用较粗的网格（16x16）来计算REC
-    grid_h, grid_w = 16, 16
+    h, w = image_size
 
-    def get_visited_grids(scanpath, grid_h, grid_w):
-        # 将[0,1]坐标映射到网格索引
-        grid_x = np.clip((scanpath[:, 0] * grid_w).astype(int), 0, grid_w - 1)
-        grid_y = np.clip((scanpath[:, 1] * grid_h).astype(int), 0, grid_h - 1)
-        # 转换为一维索引并去重
-        grid_indices = grid_y * grid_w + grid_x
-        return set(grid_indices)
+    # 转换为像素坐标
+    P = pred_scanpath.copy()
+    P[:, 0] = P[:, 0] * w
+    P[:, 1] = P[:, 1] * h
 
-    pred_grids = get_visited_grids(pred_scanpath, grid_h, grid_w)
-    true_grids = get_visited_grids(true_scanpath, grid_h, grid_w)
+    Q = true_scanpath.copy()
+    Q[:, 0] = Q[:, 0] * w
+    Q[:, 1] = Q[:, 1] * h
 
-    # 计算重叠区域数量
-    intersection = len(pred_grids & true_grids)
+    # 检查k是否合理
+    if len(P) < k or len(Q) < k:
+        return float('inf')
 
-    # 返回重叠数量（不是IoU）
-    # 根据ScanDMM的值（4.67），这应该是一个计数而不是比率
-    return float(intersection)
+    # 创建时间嵌入向量
+    P_vectors = []
+    for i in np.arange(0, len(P) - k + 1):
+        P_vectors.append(P[i:i + k])
+
+    Q_vectors = []
+    for i in np.arange(0, len(Q) - k + 1):
+        Q_vectors.append(Q[i:i + k])
+
+    # 计算最小距离
+    distances = []
+    for s_k_vec in Q_vectors:
+        norms = []
+        for h_k_vec in P_vectors:
+            d = np.linalg.norm(s_k_vec - h_k_vec)
+            norms.append(d)
+        distances.append(min(norms) / k)
+
+    # 根据distance_mode返回结果
+    if distance_mode == 'Mean':
+        return sum(distances) / len(distances)
+    elif distance_mode == 'Hausdorff':
+        return max(distances)
+    else:
+        return float('inf')
 
 
-def compute_all_metrics(pred_scanpath: np.ndarray, true_scanpath: np.ndarray,
-                        image_size: Tuple[int, int] = (256, 512), grid_size: int = 8) -> dict:
+def create_substitution_matrix(Xbin: int, Ybin: int, threshold: float):
     """
-    计算所有评估指标
+    创建ScanMatch的替换矩阵
 
     Args:
-        pred_scanpath: 预测路径 (T, 2)，坐标范围[0, 1]，格式为(x, y)
-        true_scanpath: 真实路径 (T, 2)，坐标范围[0, 1]，格式为(x, y)
-        image_size: 图像尺寸 (height, width)
-        grid_size: LEV计算时使用的网格大小（默认8x8，更宽容的匹配标准）
+        Xbin: X方向bin数量
+        Ybin: Y方向bin数量
+        threshold: 距离阈值
 
     Returns:
-        包含所有指标的字典
+        替换矩阵
     """
-    lev = compute_lev(pred_scanpath, true_scanpath, image_size, grid_size=grid_size)
-    dtw = compute_dtw(pred_scanpath, true_scanpath, image_size)
-    rec = compute_rec(pred_scanpath, true_scanpath, image_size)
+    # 生成所有网格中心点的坐标
+    coords = [(x, y) for y in range(Ybin) for x in range(Xbin)]
+    coords = np.array(coords)
 
-    return {
-        'LEV': lev,
-        'DTW': dtw,
-        'REC': rec
-    }
+    # 计算欧几里得距离矩阵
+    diff = coords[:, np.newaxis, :] - coords[np.newaxis, :, :]
+    dist_matrix = np.sqrt(np.sum(diff ** 2, axis=-1))
+
+    # 转换成替换矩阵
+    max_val = np.max(dist_matrix)
+    sub_matrix = np.abs(dist_matrix - max_val) - (max_val - threshold)
+
+    return sub_matrix
 
 
-# ==================== 新增指标：更适合眼动路径评估 ====================
-
-def compute_similarity(pred_scanpath: np.ndarray, true_scanpath: np.ndarray) -> float:
+def scanmatch_nw_algo(intseq1, intseq2, scoring_matrix, gap):
     """
-    计算相似度 (SIM) - 基于平均欧氏距离
+    Needleman-Wunsch算法用于ScanMatch，返回归一化得分
 
-    这是一个简单直观的指标，衡量预测路径与真实路径的平均距离
+    Args:
+        intseq1: 整数序列1
+        intseq2: 整数序列2
+        scoring_matrix: 得分矩阵
+        gap: gap惩罚
+
+    Returns:
+        归一化得分 [0, 1]
+    """
+    m = len(intseq1)
+    n = len(intseq2)
+
+    F = np.zeros((n + 1, m + 1))
+    F[1:, 0] = gap * np.arange(1, n + 1)
+    F[0, 1:] = gap * np.arange(1, m + 1)
+
+    pointer = np.full((n + 1, m + 1), 4, dtype=np.uint8)
+    pointer[:, 0] = 2
+    pointer[0, 0] = 1
+
+    currentFColumn = F[:, 0].copy()
+
+    for outer in range(1, m + 1):
+        scoredMatchColumn = scoring_matrix[intseq2, intseq1[outer - 1]]
+        lastFColumn = currentFColumn.copy()
+        currentFColumn = F[:, outer].copy()
+        ptr = pointer[:, outer].copy()
+        best = currentFColumn[0]
+
+        for inner in range(1, n + 1):
+            up = best + gap
+            left = lastFColumn[inner] + gap
+            diagonal = lastFColumn[inner - 1] + scoredMatchColumn[inner - 1]
+
+            if up > left:
+                best = up
+                pos = 2
+            else:
+                best = left
+                pos = 4
+
+            if diagonal >= best:
+                best = diagonal
+                ptr[inner] = 1
+            else:
+                ptr[inner] = pos
+
+            currentFColumn[inner] = best
+
+        F[:, outer] = currentFColumn
+        pointer[:, outer] = ptr
+
+    score = F[n, m]
+
+    # 归一化得分
+    max_score = min(m, n) * np.max(np.diag(scoring_matrix))
+    normalized_score = score / max_score if max_score != 0 else 0.0
+
+    return normalized_score
+
+
+def compute_scanmatch(pred_scanpath: np.ndarray, true_scanpath: np.ndarray,
+                      image_size: Tuple[int, int] = (256, 512),
+                      Xbins: int = 12, Ybins: int = 8, threshold: float = 3.5) -> float:
+    """
+    计算ScanMatch得分
 
     Args:
         pred_scanpath: 预测路径 (T, 2)，坐标范围[0, 1]
         true_scanpath: 真实路径 (T, 2)，坐标范围[0, 1]
+        image_size: 图像尺寸
+        Xbins: X方向bin数量
+        Ybins: Y方向bin数量
+        threshold: 替换矩阵阈值
 
     Returns:
-        相似度分数（越小越好，0表示完全匹配）
+        ScanMatch得分 [0, 1]（越大越好）
     """
-    # 计算每个点的欧氏距离
-    distances = np.linalg.norm(pred_scanpath - true_scanpath, axis=1)
-    # 返回平均距离
-    return float(np.mean(distances))
+    h, w = image_size
+    height_width = ((0, h), (0, w))
+
+    # 转换为像素坐标
+    P = pred_scanpath.copy()
+    P[:, 0] = np.clip(P[:, 0] * w, 0, w - 1)
+    P[:, 1] = np.clip(P[:, 1] * h, 0, h - 1)
+
+    Q = true_scanpath.copy()
+    Q[:, 0] = np.clip(Q[:, 0] * w, 0, w - 1)
+    Q[:, 1] = np.clip(Q[:, 1] * h, 0, h - 1)
+
+    # 转换为字符串和数值
+    P_str, P_num = scanpath_to_string(P, height_width, Xbins, Ybins, 0)
+    Q_str, Q_num = scanpath_to_string(Q, height_width, Xbins, Ybins, 0)
+
+    # 创建替换矩阵
+    submatrix = create_substitution_matrix(Xbins, Ybins, threshold)
+
+    # 计算ScanMatch得分
+    return scanmatch_nw_algo(P_num, Q_num, submatrix, 0)
 
 
 def compute_multimatch_metrics(pred_scanpath: np.ndarray, true_scanpath: np.ndarray,
@@ -198,14 +375,13 @@ def compute_multimatch_metrics(pred_scanpath: np.ndarray, true_scanpath: np.ndar
     计算MultiMatch风格的指标
 
     MultiMatch是眼动研究中常用的评估方法，包含多个维度：
-    - Vector: 方向相似度
-    - Length: 步长相似度
+    - Vector: 方向相似度（余弦相似度）
+    - Length: 步长相似度（Pearson相关系数）
     - Position: 位置相似度
-    - Duration: 持续时间相似度（这里简化为序列长度）
 
     Args:
-        pred_scanpath: 预测路径 (T, 2)
-        true_scanpath: 真实路径 (T, 2)
+        pred_scanpath: 预测路径 (T, 2)，坐标范围[0, 1]
+        true_scanpath: 真实路径 (T, 2)，坐标范围[0, 1]
         image_size: 图像尺寸
 
     Returns:
@@ -229,7 +405,7 @@ def compute_multimatch_metrics(pred_scanpath: np.ndarray, true_scanpath: np.ndar
     pred_lengths = np.linalg.norm(pred_vectors, axis=1)
     true_lengths = np.linalg.norm(true_vectors, axis=1)
 
-    # 使用相关系数
+    # 使用Pearson相关系数
     if len(pred_lengths) > 1 and np.std(pred_lengths) > 0 and np.std(true_lengths) > 0:
         length_similarity = float(pearsonr(pred_lengths, true_lengths)[0])
     else:
@@ -253,8 +429,6 @@ def compute_scanpath_saliency_metrics(pred_scanpath: np.ndarray,
                                        image_size: Tuple[int, int] = (256, 512)) -> dict:
     """
     计算基于显著性图的指标
-
-    这些指标评估预测路径是否覆盖了图像的显著区域
 
     Args:
         pred_scanpath: 预测路径 (T, 2)，坐标范围[0, 1]
@@ -281,14 +455,12 @@ def compute_scanpath_saliency_metrics(pred_scanpath: np.ndarray,
 
     # 确保显著性图尺寸正确
     if saliency_map.shape != (h, w):
-        # 如果尺寸不匹配，进行插值
         from scipy.ndimage import zoom
         scale_h = h / saliency_map.shape[0]
         scale_w = w / saliency_map.shape[1]
         saliency_map = zoom(saliency_map, (scale_h, scale_w), order=1)
 
     # 1. NSS (Normalized Scanpath Saliency)
-    # 在注视点位置的显著性值，归一化到均值0方差1
     sal_mean = np.mean(saliency_map)
     sal_std = np.std(saliency_map) + 1e-8
 
@@ -302,14 +474,12 @@ def compute_scanpath_saliency_metrics(pred_scanpath: np.ndarray,
     nss = float(np.mean([(s - sal_mean) / sal_std for s in fixation_saliencies]))
 
     # 2. CC (Correlation Coefficient)
-    # 创建注视密度图
     fixation_map = np.zeros((h, w))
     for i in range(len(pred_pixels)):
         y, x = pred_pixels[i, 1], pred_pixels[i, 0]
         y = min(y, h - 1)
         x = min(x, w - 1)
-        # 使用高斯核模糊注视点
-        sigma = min(h, w) * 0.02  # 2%的图像尺寸
+        sigma = min(h, w) * 0.02
         y_range = range(max(0, int(y - 3 * sigma)), min(h, int(y + 3 * sigma + 1)))
         x_range = range(max(0, int(x - 3 * sigma)), min(w, int(x + 3 * sigma + 1)))
         for yy in y_range:
@@ -317,7 +487,6 @@ def compute_scanpath_saliency_metrics(pred_scanpath: np.ndarray,
                 dist_sq = (yy - y) ** 2 + (xx - x) ** 2
                 fixation_map[yy, xx] += np.exp(-dist_sq / (2 * sigma ** 2))
 
-    # 归一化
     if fixation_map.sum() > 0:
         fixation_map = fixation_map / fixation_map.sum()
     if saliency_map.sum() > 0:
@@ -325,19 +494,15 @@ def compute_scanpath_saliency_metrics(pred_scanpath: np.ndarray,
     else:
         saliency_map_norm = saliency_map
 
-    # 计算相关系数
     if np.std(fixation_map) > 0 and np.std(saliency_map_norm) > 0:
         cc = float(pearsonr(fixation_map.flatten(), saliency_map_norm.flatten())[0])
     else:
         cc = 0.0
 
     # 3. Saliency Coverage
-    # 路径覆盖的显著性区域比例
-    # 定义显著性阈值（top 20%）
     sal_threshold = np.percentile(saliency_map, 80)
     salient_regions = saliency_map > sal_threshold
 
-    # 检查路径是否访问了显著区域
     visited_salient = 0
     for i in range(len(pred_pixels)):
         y, x = pred_pixels[i, 1], pred_pixels[i, 0]
@@ -355,29 +520,36 @@ def compute_scanpath_saliency_metrics(pred_scanpath: np.ndarray,
     }
 
 
-def compute_all_metrics_extended(pred_scanpath: np.ndarray,
-                                  true_scanpath: np.ndarray,
-                                  saliency_map: np.ndarray = None,
-                                  image_size: Tuple[int, int] = (256, 512),
-                                  grid_size: int = 8) -> dict:
+def compute_all_metrics(pred_scanpath: np.ndarray, true_scanpath: np.ndarray,
+                        image_size: Tuple[int, int] = (256, 512),
+                        saliency_map: Optional[np.ndarray] = None) -> dict:
     """
-    计算所有评估指标（包括原有指标和新增指标）
+    计算所有评估指标（使用官方实现）
 
     Args:
         pred_scanpath: 预测路径 (T, 2)，坐标范围[0, 1]，格式为(x, y)
         true_scanpath: 真实路径 (T, 2)，坐标范围[0, 1]，格式为(x, y)
-        saliency_map: 显著性图 (H, W)，可选
         image_size: 图像尺寸 (height, width)
-        grid_size: LEV计算时使用的网格大小
+        saliency_map: 显著性图 (H, W)，可选
 
     Returns:
         包含所有指标的字典
     """
-    # 原有指标
-    metrics = compute_all_metrics(pred_scanpath, true_scanpath, image_size, grid_size)
+    metrics = {}
 
-    # 新增指标
-    metrics['SIM'] = compute_similarity(pred_scanpath, true_scanpath)
+    # 基础指标（官方实现）
+    metrics['LEV'] = compute_lev(pred_scanpath, true_scanpath, image_size)
+    metrics['DTW'] = compute_dtw(pred_scanpath, true_scanpath, image_size)
+    metrics['REC'] = compute_rec(pred_scanpath, true_scanpath, threshold=12.0, image_size=image_size)
+
+    # ScanMatch
+    metrics['ScanMatch'] = compute_scanmatch(pred_scanpath, true_scanpath, image_size)
+
+    # TDE
+    try:
+        metrics['TDE'] = compute_tde(pred_scanpath, true_scanpath, k=2, image_size=image_size)
+    except:
+        metrics['TDE'] = float('inf')
 
     # MultiMatch指标
     mm_metrics = compute_multimatch_metrics(pred_scanpath, true_scanpath, image_size)
@@ -389,3 +561,7 @@ def compute_all_metrics_extended(pred_scanpath: np.ndarray,
         metrics.update(sal_metrics)
 
     return metrics
+
+
+# 保持向后兼容的别名
+compute_all_metrics_extended = compute_all_metrics
