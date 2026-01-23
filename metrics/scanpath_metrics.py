@@ -31,9 +31,10 @@ def scanpath_to_string(scanpath, height_width, Xbins, Ybins, Tbins):
         except Exception as x:
             print("Temporal information doesn't exist.")
 
-    height = height_width[0][0]
+    height = height_width[0][1]  # 修复：应该是[0][1]而不是[0][0]
     width = height_width[1][1]
-    height_step, width_step = height // Ybins, width // Xbins
+    height_step = height // Ybins if Ybins > 0 else 1
+    width_step = width // Xbins if Xbins > 0 else 1
     string = ''
     num = list()
 

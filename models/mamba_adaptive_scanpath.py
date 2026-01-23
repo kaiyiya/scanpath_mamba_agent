@@ -241,7 +241,7 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             x_center = positions[i, 1] * W - patch_size / 2  # X坐标（经度）
 
             # Y坐标clamp（纬度不是周期性的）
-            y_start = int(torch.clamp(torch.tensor(y_center), 0, H - patch_size).item())
+            y_start = int(torch.clamp(y_center, 0, H - patch_size).item())
 
             # X坐标wrap around（经度是周期性的）
             x_start = int(x_center) % W

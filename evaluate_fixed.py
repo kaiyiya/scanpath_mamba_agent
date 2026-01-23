@@ -122,7 +122,7 @@ def evaluate_model():
         # 简化输出：每10个样本打印一次进度
         if (idx + 1) % 5 == 0 or idx == 0 or idx == num_samples - 1:
             print(f"已评估 {idx + 1}/{num_samples} 个样本... "
-                  f"(当前样本: LEV={best_metrics['LEV']:.1f}, SIM={best_metrics['SIM']:.3f}, "
+                  f"(当前样本: LEV={best_metrics['LEV']:.1f}, ScanMatch={best_metrics.get('ScanMatch', 0):.3f}, "
                   f"SalCov={best_metrics.get('SalCoverage', 0):.2f})")
 
     # 打印汇总统计
@@ -131,9 +131,10 @@ def evaluate_model():
     print("=" * 70)
 
     print("\n【最佳匹配指标】")
-    for metric_name in ['LEV', 'DTW', 'REC', 'SIM', 'MM_Vector', 'MM_Length', 'MM_Position']:
-        values = [m['best'][metric_name] for m in all_metrics]
-        print(f"  {metric_name:12s}: {np.mean(values):7.3f} ± {np.std(values):6.3f}")
+    for metric_name in ['LEV', 'DTW', 'REC', 'ScanMatch', 'TDE', 'MM_Vector', 'MM_Length', 'MM_Position']:
+        if metric_name in all_metrics[0]['best']:
+            values = [m['best'][metric_name] for m in all_metrics]
+            print(f"  {metric_name:12s}: {np.mean(values):7.3f} ± {np.std(values):6.3f}")
 
     # 显著性指标（如果有）
     if 'NSS' in all_metrics[0]['best']:
@@ -143,21 +144,29 @@ def evaluate_model():
             print(f"  {metric_name:12s}: {np.mean(values):7.3f} ± {np.std(values):6.3f}")
 
     print("\n【平均指标】")
-    for metric_name in ['LEV', 'DTW', 'REC', 'SIM']:
-        values = [m['avg'][metric_name] for m in all_metrics]
-        print(f"  {metric_name:12s}: {np.mean(values):7.3f} ± {np.std(values):6.3f}")
+    for metric_name in ['LEV', 'DTW', 'REC', 'ScanMatch', 'TDE']:
+        if metric_name in all_metrics[0]['avg']:
+            values = [m['avg'][metric_name] for m in all_metrics]
+            print(f"  {metric_name:12s}: {np.mean(values):7.3f} ± {np.std(values):6.3f}")
 
     print("=" * 70)
 
-    # 找出最好和最差的样本
-    sim_values = [m['best']['SIM'] for m in all_metrics]
-    best_sample_idx = np.argmin(sim_values)
-    worst_sample_idx = np.argmax(sim_values)
+    # 找出最好和最差的样本（使用ScanMatch或LEV）
+    if 'ScanMatch' in all_metrics[0]['best']:
+        metric_values = [m['best']['ScanMatch'] for m in all_metrics]
+        best_sample_idx = np.argmax(metric_values)  # ScanMatch越大越好
+        worst_sample_idx = np.argmin(metric_values)
+        metric_name = 'ScanMatch'
+    else:
+        metric_values = [m['best']['LEV'] for m in all_metrics]
+        best_sample_idx = np.argmin(metric_values)  # LEV越小越好
+        worst_sample_idx = np.argmax(metric_values)
+        metric_name = 'LEV'
 
     print("\n【最佳样本】")
     best_sample = all_metrics[best_sample_idx]
     print(f"  样本: {best_sample['key']}")
-    print(f"  SIM={best_sample['best']['SIM']:.4f}, LEV={best_sample['best']['LEV']:.1f}, "
+    print(f"  {metric_name}={best_sample['best'][metric_name]:.4f}, LEV={best_sample['best']['LEV']:.1f}, "
           f"MM_Position={best_sample['best']['MM_Position']:.3f}")
     if 'NSS' in best_sample['best']:
         print(f"  NSS={best_sample['best']['NSS']:.3f}, SalCoverage={best_sample['best']['SalCoverage']:.3f}")
@@ -165,7 +174,7 @@ def evaluate_model():
     print("\n【最差样本】")
     worst_sample = all_metrics[worst_sample_idx]
     print(f"  样本: {worst_sample['key']}")
-    print(f"  SIM={worst_sample['best']['SIM']:.4f}, LEV={worst_sample['best']['LEV']:.1f}, "
+    print(f"  {metric_name}={worst_sample['best'][metric_name]:.4f}, LEV={worst_sample['best']['LEV']:.1f}, "
           f"MM_Position={worst_sample['best']['MM_Position']:.3f}")
     if 'NSS' in worst_sample['best']:
         print(f"  NSS={worst_sample['best']['NSS']:.3f}, SalCoverage={worst_sample['best']['SalCoverage']:.3f}")
@@ -175,9 +184,10 @@ def evaluate_model():
     # 指标解释
     print("\n指标说明:")
     print("  LEV: Levenshtein距离 (越小越好, <20优秀, 20-25良好, >25一般)")
-    print("  DTW: 动态时间规整距离 (越小越好, 归一化坐标下<5优秀)")
-    print("  REC: 重现率 (越大越好)")
-    print("  SIM: 平均欧氏距离 (越小越好, <0.2优秀, 0.2-0.3良好)")
+    print("  DTW: 动态时间规整距离 (越小越好, 像素坐标下<5000优秀)")
+    print("  REC: 重现率百分比 (0-100, 越大越好)")
+    print("  ScanMatch: 序列匹配得分 (0-1, 越大越好, >0.7优秀)")
+    print("  TDE: 时间延迟嵌入距离 (越小越好)")
     print("  MM_Vector: 方向相似度 (0-1, 越大越好)")
     print("  MM_Length: 步长相似度 (0-1, 越大越好)")
     print("  MM_Position: 位置相似度 (0-1, 越大越好)")
