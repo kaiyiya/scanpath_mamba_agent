@@ -369,45 +369,45 @@ def train():
                 above_boundary * (predicted_scanpaths - boundary_max) ** 2
             )
 
-            # ========== 方案C-改进版权重配置：大幅降低motion_consistency权重 ==========
-            # 调整为50 epoch的训练计划
-            # 关键改进：
-            # 1. 大幅提高spatial_coverage权重，鼓励探索整个图像
-            # 2. 降低trajectory_smoothness权重，允许更大的步长
-            # 3. 增加多样性，减少过拟合
-            # 4. motion_consistency权重降低到0.1-0.3（从1.0-1.5），避免过度约束
+            # ========== 紧急修复版权重配置：解决Teacher Forcing无法复制GT的问题 ==========
+            # 诊断发现：Teacher Forcing=1.0时仍无法复制GT（距离0.18）
+            # 根本原因：VAE随机性太强 + reconstruction权重太低
+            # 解决方案：
+            # 1. 大幅提高reconstruction和sequence_alignment权重
+            # 2. 大幅降低KL散度权重（减少VAE随机性）
+            # 3. 暂时降低spatial_coverage（先学会复制，再学探索）
             if epoch <= 20:
                 weights = {
-                    'reconstruction': 2.0,  # 降低（从3.0到2.0），给其他损失更多空间
-                    'kl': 0.003,  # 提高（从0.002到0.003），增加多样性
-                    'spatial_coverage': 2.0,  # 大幅提高（从0.5到2.0），鼓励覆盖整个图像
-                    'trajectory_smoothness': 0.3,  # 大幅降低（从1.0到0.3），允许大步长
-                    'direction_consistency': 0.3,  # 降低（从0.5到0.3）
-                    'sequence_alignment': 1.5,  # 降低（从2.0到1.5）
-                    'motion_consistency': 0.1,  # 大幅降低（从1.0到0.1），作为辅助约束
+                    'reconstruction': 5.0,  # 大幅提高（从2.0到5.0）
+                    'kl': 0.0001,  # 大幅降低（从0.003到0.0001），减少随机性
+                    'spatial_coverage': 1.0,  # 降低（从2.0到1.0），先学会复制
+                    'trajectory_smoothness': 0.3,
+                    'direction_consistency': 0.3,
+                    'sequence_alignment': 3.0,  # 提高（从1.5到3.0）
+                    'motion_consistency': 0.05,  # 降低（从0.1到0.05）
                     'boundary': 0.2
                 }
             elif epoch <= 40:
                 progress = (epoch - 20) / 20.0
                 weights = {
-                    'reconstruction': 2.0 + 0.5 * progress,  # 逐渐增加到2.5
-                    'kl': 0.003,
-                    'spatial_coverage': 2.0 + 0.5 * progress,  # 逐渐增加到2.5
+                    'reconstruction': 5.0 + 1.0 * progress,  # 逐渐增加到6.0
+                    'kl': 0.0001 + 0.0004 * progress,  # 逐渐增加到0.0005
+                    'spatial_coverage': 1.0 + 1.0 * progress,  # 逐渐增加到2.0
                     'trajectory_smoothness': 0.3,
                     'direction_consistency': 0.3,
-                    'sequence_alignment': 1.5 + 0.5 * progress,  # 逐渐增加到2.0
-                    'motion_consistency': 0.1 + 0.2 * progress,  # 逐渐增加到0.3（从0.1）
+                    'sequence_alignment': 3.0 + 1.0 * progress,  # 逐渐增加到4.0
+                    'motion_consistency': 0.05 + 0.05 * progress,  # 逐渐增加到0.1
                     'boundary': 0.2
                 }
             else:
                 weights = {
-                    'reconstruction': 2.5,  # 最终权重
-                    'kl': 0.003,
-                    'spatial_coverage': 2.5,  # 最终权重（高）
-                    'trajectory_smoothness': 0.3,  # 保持低
+                    'reconstruction': 6.0,  # 最终权重（高）
+                    'kl': 0.0005,  # 最终权重（低）
+                    'spatial_coverage': 2.0,
+                    'trajectory_smoothness': 0.3,
                     'direction_consistency': 0.3,
-                    'sequence_alignment': 2.0,
-                    'motion_consistency': 0.3,  # 最终权重（从1.5降低到0.3）
+                    'sequence_alignment': 4.0,  # 最终权重（高）
+                    'motion_consistency': 0.1,
                     'boundary': 0.2
                 }
 

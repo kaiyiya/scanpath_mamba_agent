@@ -531,8 +531,12 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             # 修复：降低下限到-2.0，对应std≈0.37，增加多样性
             logvar = torch.clamp(logvar, min=-2.0, max=2.0)  # 限制logvar范围，确保std在[0.37, 2.7]
 
-            # 重参数化采样（推理时增加温度以提高多样性）
-            z = self.reparameterize(mu, logvar, temperature=temperature)  # (B, d_model//2)
+            # 重参数化采样（训练时使用随机性，推理时使用确定性）
+            if self.training:
+                z = self.reparameterize(mu, logvar, temperature=temperature)  # (B, d_model//2)
+            else:
+                # 推理时：直接使用mu，不采样，确保确定性
+                z = mu  # (B, d_model//2)
 
             # 从隐变量解码位置（融合当前位置和历史位置信息）
             z_with_pos = torch.cat([z, prev_pos, history_pos], dim=-1)  # (B, d_model//2+4)
