@@ -41,9 +41,9 @@ def scanpath_to_string(scanpath, height_width, Xbins, Ybins, Tbins):
     for i in range(scanpath.shape[0]):
         fixation = scanpath[i].astype(np.int32)
         xbin = min(Xbins-1, fixation[0] // width_step)
-        xbin = max(0, fixation[0] // width_step)
+        xbin = max(0, xbin)
         ybin = min(Ybins-1, ((height - fixation[1]) // height_step))
-        ybin = max(0, ((height - fixation[1]) // height_step))
+        ybin = max(0, ybin)
         corrs_x = chr(65 + xbin)
         corrs_y = chr(97 + ybin)
         T = 1
@@ -51,7 +51,7 @@ def scanpath_to_string(scanpath, height_width, Xbins, Ybins, Tbins):
             T = fixation[2] // Tbins
         for t in range(T):
             string += (corrs_y + corrs_x)
-            num += [(ybin * (Xbins-1)) + xbin - 1]
+            num += [ybin * Xbins + xbin]  # 修复：正确的索引计算
 
     return string, num
 
@@ -280,6 +280,13 @@ def scanmatch_nw_algo(intseq1, intseq2, scoring_matrix, gap):
     """
     m = len(intseq1)
     n = len(intseq2)
+
+    # 边界检查：确保索引在scoring_matrix范围内
+    matrix_size = scoring_matrix.shape[0]
+    intseq1 = np.array(intseq1)
+    intseq2 = np.array(intseq2)
+    intseq1 = np.clip(intseq1, 0, matrix_size - 1)
+    intseq2 = np.clip(intseq2, 0, matrix_size - 1)
 
     F = np.zeros((n + 1, m + 1))
     F[1:, 0] = gap * np.arange(1, n + 1)

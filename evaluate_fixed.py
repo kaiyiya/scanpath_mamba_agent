@@ -212,7 +212,8 @@ def evaluate_model():
                     'min': float(np.min([m['best'][metric] for m in all_metrics])),
                     'max': float(np.max([m['best'][metric] for m in all_metrics]))
                 }
-                for metric in ['LEV', 'DTW', 'REC', 'SIM', 'MM_Vector', 'MM_Length', 'MM_Position']
+                for metric in ['LEV', 'DTW', 'REC', 'ScanMatch', 'TDE', 'MM_Vector', 'MM_Length', 'MM_Position']
+                if metric in all_metrics[0]['best']
             }
         },
         'per_sample': [
