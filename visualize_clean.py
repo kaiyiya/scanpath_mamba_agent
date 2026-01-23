@@ -176,7 +176,8 @@ def visualize_clean_grid(num_samples=None, num_paths_per_sample=20):
         best_idx = np.argmin([m['DTW'] for m in metrics_list])
         best_metrics = metrics_list[best_idx]
 
-        print(f"  指标: LEV={best_metrics['LEV']:.1f}, SIM={best_metrics['SIM']:.3f}, "
+        print(f"  指标: LEV={best_metrics['LEV']:.1f}, "
+              f"ScanMatch={best_metrics.get('ScanMatch', 0):.3f}, "
               f"MM_Pos={best_metrics['MM_Position']:.3f}, "
               f"SalCov={best_metrics.get('SalCoverage', 0):.2f}")
 
