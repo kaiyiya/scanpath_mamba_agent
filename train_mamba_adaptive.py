@@ -371,48 +371,44 @@ def train():
                 above_boundary * (predicted_scanpaths - boundary_max) ** 2
             )
 
-            # ========== 第二次修复版权重配置：解决步长过短和过拟合问题 ==========
-            # 新问题诊断：
-            # 1. 步长过短：SalCoverage从56%降到15%，路径移动距离太短
-            # 2. 过拟合严重：训练0.113 vs 验证0.357（3倍差距）
-            # 3. KL=0.0001太低：模型退化为确定性，无法泛化
-            #
-            # 解决方案：
-            # 1. 提高KL散度权重（0.0001 → 0.001），恢复适度随机性
-            # 2. 降低trajectory_smoothness权重（0.3 → 0.1），允许更大步长
-            # 3. 提高spatial_coverage权重（1.0 → 2.0），鼓励探索
-            # 4. 降低reconstruction权重（5.0 → 3.0），减少过拟合
+            # ========== 方案A优化：回退到绝对位置 + 降低VAE随机性 + 增强序列对齐 ==========
+            # 改进策略：
+            # 1. 回退到绝对位置预测（相对位移导致LEV恶化）
+            # 2. 降低VAE随机性（temperature=0.3）
+            # 3. 大幅增强sequence_alignment权重（2.0 → 5.0）
+            # 4. 进一步降低KL权重（0.001 → 0.0005），配合低temperature
+            # 5. 保持其他有效的权重配置
             if epoch <= 20:
                 weights = {
-                    'reconstruction': 3.0,  # 降低（从5.0到3.0），减少过拟合
-                    'kl': 0.001,  # 提高（从0.0001到0.001），恢复随机性
-                    'spatial_coverage': 2.0,  # 提高（从1.0到2.0），鼓励探索
-                    'trajectory_smoothness': 0.1,  # 降低（从0.3到0.1），允许大步长
-                    'direction_consistency': 0.2,  # 降低（从0.3到0.2）
-                    'sequence_alignment': 2.0,  # 降低（从3.0到2.0）
-                    'motion_consistency': 0.05,
+                    'reconstruction': 3.0,  # 保持适中，减少过拟合
+                    'kl': 0.0005,  # 降低（从0.001到0.0005），配合低temperature
+                    'spatial_coverage': 2.0,  # 保持高，鼓励探索
+                    'trajectory_smoothness': 0.1,  # 保持低，允许大步长
+                    'direction_consistency': 0.2,  # 保持适中
+                    'sequence_alignment': 5.0,  # 大幅提高（从2.0到5.0），改善LEV
+                    'motion_consistency': 0.05,  # 保持低
                     'boundary': 0.2
                 }
             elif epoch <= 40:
                 progress = (epoch - 20) / 20.0
                 weights = {
                     'reconstruction': 3.0 + 0.5 * progress,  # 逐渐增加到3.5
-                    'kl': 0.001 + 0.0005 * progress,  # 逐渐增加到0.0015
+                    'kl': 0.0005 + 0.0005 * progress,  # 逐渐增加到0.001
                     'spatial_coverage': 2.0 + 0.5 * progress,  # 逐渐增加到2.5
                     'trajectory_smoothness': 0.1,
                     'direction_consistency': 0.2,
-                    'sequence_alignment': 2.0 + 0.5 * progress,  # 逐渐增加到2.5
+                    'sequence_alignment': 5.0 + 2.0 * progress,  # 逐渐增加到7.0
                     'motion_consistency': 0.05 + 0.05 * progress,  # 逐渐增加到0.1
                     'boundary': 0.2
                 }
             else:
                 weights = {
                     'reconstruction': 3.5,  # 最终权重（适中）
-                    'kl': 0.0015,  # 最终权重（适中）
+                    'kl': 0.001,  # 最终权重（低）
                     'spatial_coverage': 2.5,  # 最终权重（高）
                     'trajectory_smoothness': 0.1,  # 保持低
                     'direction_consistency': 0.2,
-                    'sequence_alignment': 2.5,
+                    'sequence_alignment': 7.0,  # 最终权重（非常高）
                     'motion_consistency': 0.1,
                     'boundary': 0.2
                 }

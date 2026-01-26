@@ -164,8 +164,8 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             nn.Linear(d_model, d_model // 2)
         )
 
-        # 从隐变量解码位移（改进：预测相对位移而不是绝对位置）
-        # 输出范围：Tanh输出[-1, 1]，然后缩放到[-0.15, 0.15]
+        # 从隐变量解码绝对位置（回退到原始方案）
+        # 输出范围：线性输出，然后用Sigmoid映射到[0, 1]
         self.position_decoder = nn.Sequential(
             nn.Linear(d_model // 2 + 4, d_model // 2),  # 加入当前位置和历史位置信息
             nn.LayerNorm(d_model // 2),
@@ -178,15 +178,11 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             nn.Linear(d_model // 4, d_model // 8),
             nn.LayerNorm(d_model // 8),
             nn.GELU(),
-            nn.Linear(d_model // 8, 2),
-            nn.Tanh()  # 输出[-1, 1]，表示位移方向和大小
+            nn.Linear(d_model // 8, 2)  # 线性输出，后续用Sigmoid
         )
 
-        # 改进初始化：让位移解码器输出接近0（小位移）
-        # 关键修复：初始化最后一层，让初始位移较小，避免大幅跳跃
-        # 使用较小的权重std，让初始输出接近0
-        nn.init.normal_(self.position_decoder[-2].weight, mean=0.0, std=0.01)  # 小std，初始位移接近0
-        nn.init.constant_(self.position_decoder[-2].bias, 0.0)  # bias=0，Tanh(0)=0，初始位移为0
+        # 标准初始化（不需要特殊初始化）
+        # Sigmoid会自动将输出映射到[0, 1]
 
         # 改进：初始化logvar层，使用更合理的初始方差（增加初始多样性）
         # 注意：latent_logvar是Sequential，需要初始化最后一层的bias
@@ -534,37 +530,24 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             # 修复：降低下限到-2.0，对应std≈0.37，增加多样性
             logvar = torch.clamp(logvar, min=-2.0, max=2.0)  # 限制logvar范围，确保std在[0.37, 2.7]
 
-            # 重参数化采样（训练时使用随机性，推理时使用确定性）
+            # 方案2：降低VAE随机性，改善序列对齐
+            # 训练时也减少随机性，使用更确定性的采样
             if self.training:
-                z = self.reparameterize(mu, logvar, temperature=temperature)  # (B, d_model//2)
+                # 训练时：使用较低的temperature，减少随机性
+                # temperature=0.5意味着std减半，更接近确定性
+                z = self.reparameterize(mu, logvar, temperature=0.3)  # (B, d_model//2)
             else:
-                # 推理时：直接使用mu，不采样，确保确定性
+                # 推理时：直接使用mu，完全确定性
                 z = mu  # (B, d_model//2)
 
             # ==================== 方案B：预测相对位移而不是绝对位置 ====================
-            # 关键改进：预测 (Δx, Δy) 而不是 (x, y)
-            # 优势：
-            # 1. 强制序列连续性（每一步基于前一步）
-            # 2. 更符合人类眼动本质（扫视是相对移动）
-            # 3. 减少VAE随机性的影响
-            # 4. 改善序列对齐（LEV指标）
-
-            # 从隐变量解码相对位移（融合当前位置和历史位置信息）
+            # 回退到绝对位置预测（相对位移预测导致LEV恶化）
+            # 从隐变量解码绝对位置（融合当前位置和历史位置信息）
             z_with_pos = torch.cat([z, prev_pos, history_pos], dim=-1)  # (B, d_model//2+4)
-            delta_pos = self.position_decoder(z_with_pos)  # (B, 2), 范围[-1, 1]
+            pos_t = self.position_decoder(z_with_pos)  # (B, 2), 范围[-1, 1]
 
-            # 将Tanh输出[-1, 1]缩放到合理的位移范围
-            # 限制最大位移为0.15（15%的图像尺寸），避免过大的跳跃
-            max_displacement = 0.15
-            delta_pos = delta_pos * max_displacement  # 范围[-0.15, 0.15]
-
-            # 计算新位置：当前位置 = 前一位置 + 位移
-            pos_t = prev_pos + delta_pos  # (B, 2)
-
-            # 方案1改进：允许位置在宽松范围内累积，保持相对位移的连续性
-            # 不要在这里严格裁剪到[0,1]，而是允许一定的越界（-0.2到1.2）
-            # 这样可以保持序列的连续性，只在计算patch时才裁剪
-            pos_t = torch.clamp(pos_t, -0.2, 1.2)
+            # Sigmoid将输出映射到[0, 1]范围
+            pos_t = torch.sigmoid(pos_t)  # (B, 2)
 
             # ==================== Y方向注意力偏置 ====================
             # 在位置预测后，添加Y方向偏置以增加Y方向多样性
@@ -577,21 +560,17 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
 
                 # 添加偏置到Y坐标（非inplace操作，避免破坏梯度图）
                 y_coord = pos_t[:, 1] + 0.1 * y_bias.squeeze(1)
-                # 同样使用宽松裁剪
-                y_coord = torch.clamp(y_coord, -0.2, 1.2)
+                # 裁剪到有效范围
+                y_coord = torch.clamp(y_coord, 0.0, 1.0)
                 # 重新组合坐标
                 pos_t = torch.stack([pos_t[:, 0], y_coord], dim=-1)
 
-            # 简化边界处理：只在最后保存位置时进行最终裁剪
-            # 对于360图像，x坐标wrap around，y坐标clamp
-            # 这里不做严格裁剪，保持位置的原始值用于序列连续性
-            # 实际的裁剪会在get_img_patches中进行
-
+            # 处理360图像的边界连续性
             # X坐标：wrap around处理（360度连续性）
             pos_t_x = pos_t[:, 0] % 1.0  # 映射到[0, 1]
 
-            # Y坐标：软裁剪（允许轻微越界，但不要太远）
-            pos_t_y = torch.clamp(pos_t[:, 1], -0.1, 1.1)
+            # Y坐标：裁剪到有效范围
+            pos_t_y = torch.clamp(pos_t[:, 1], 0.0, 1.0)
 
             pos_t = torch.stack([pos_t_x, pos_t_y], dim=-1)  # (B, 2)
 
