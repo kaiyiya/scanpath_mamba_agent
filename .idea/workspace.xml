@@ -1,0 +1,392 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="SELECTIVE" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="5723d4d7-6133-4bfc-afd3-dda1d84d9950" name="Changes" comment="feat(模型改进) go on" />
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="MarkdownSettingsMigration">
+    <option name="stateVersion" value="1" />
+  </component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 3
+}</component>
+  <component name="ProjectId" id="38VOl1ix2CcLdIsb6RuDdf16Vl5" />
+  <component name="ProjectLevelVcsManager">
+    <ConfirmationsSetting value="2" id="Add" />
+  </component>
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ASKED_ADD_EXTERNAL_FILES&quot;: &quot;true&quot;,
+    &quot;ASKED_SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.OpenProjectViewOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
+    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
+    &quot;last_opened_file_path&quot;: &quot;E:/vscode/eye_scan/scanpath_mamba_agent/scanpath_mamba_agent&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+  }
+}</component>
+  <component name="RecentsManager">
+    <key name="MoveFile.RECENT_KEYS">
+      <recent name="E:\vscode\eye_scan\scanpath_mamba_agent\scanpath_mamba_agent\visualization_results_adaptive" />
+    </key>
+  </component>
+  <component name="SharedIndexes">
+    <attachedChunks>
+      <set>
+        <option value="bundled-python-sdk-c69650fc56ca-b11f5e8da5ad-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-233.15619.17" />
+      </set>
+    </attachedChunks>
+  </component>
+  <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="5723d4d7-6133-4bfc-afd3-dda1d84d9950" name="Changes" comment="" />
+      <created>1768881418361</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1768881418361</updated>
+      <workItem from="1768881420119" duration="5005000" />
+      <workItem from="1768889537986" duration="48049000" />
+      <workItem from="1769146911635" duration="6988000" />
+      <workItem from="1769386914036" duration="9815000" />
+    </task>
+    <task id="LOCAL-00001" summary="feat(models): 添加优化版扫描路径生成模型V5&#10;&#10;- 引入更大的特征图尺寸（14x14）以保留更多空间信息&#10;- 简化注意力机制，只在关键层使用轻量注意力模块&#10;- 实现Scheduled Sampling策略替代简单Teacher Forcing&#10;- 采用自适应损失函数动态调整位置与方向权重并加入多重方向约束&#10;- 优化局部-全局特征融合与简化特征更新机制&#10;- 增加了正则化方法（Label Smoothing和DropPath）&#10;- 配置文件新增Mamba-Adaptive模型设置，支持自动停止和数据增强&#10;- 新增数据加载模块，支持训练与测试数据的数据增强与预处理&#10;- 指标模块引入余弦等多种扫描路径评估方法&#10;- 模型导入接口统一管理，方便调用与扩展">
+      <option name="closed" value="true" />
+      <created>1768881481908</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1768881481908</updated>
+    </task>
+    <task id="LOCAL-00002" summary="perf(training): 优化训练策略提升模型收敛速度与效果&#10;&#10;- 提高初始学习率至1e-4，加快训练速度&#10;- 学习率衰减因子调整为0.9995，配合余弦退火调度器改善收敛&#10;- 改进Teacher Forcing策略，训练前100个epoch保持0.7，之后缓慢降至0.5&#10;- 调整Beta-VAE权重，减弱KL散度影响，保持重构损失主导&#10;- 大幅降低正则化项权重，优先优化位置预测精度&#10;- 引入加权位置误差计算，更准确反映模型性能&#10;- 验证时引入少量Teacher Forcing (0.1)以缩小训练与推理分布差异">
+      <option name="closed" value="true" />
+      <created>1768882795843</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1768882795843</updated>
+    </task>
+    <task id="LOCAL-00003" summary="fix(train): 优化路径中心聚集惩罚机制并调整权重策略&#10;&#10;- 改进中心聚集惩罚，采用分阶段强度策略以更精细地惩罚预测均值靠近中心的情况&#10;- 新增点中心惩罚，直接惩罚预测点序列过于集中在中心区域&#10;- 提高覆盖范围和中心聚集惩罚的权重，解决路径过度聚集中心的问题&#10;- 设计动态权重调整方案，训练早期侧重分散性，后期平衡位置精度和路径合理性&#10;- 同步更新验证环节的中心聚集和点中心惩罚计算与训练保持一致&#10;- 增加训练过程中点中心惩罚的日志输出，便于监控惩罚项表现">
+      <option name="closed" value="true" />
+      <created>1768883906312</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1768883906312</updated>
+    </task>
+    <task id="LOCAL-00004" summary="feat(train): 优化训练策略以提升位置误差表现&#10;&#10;- 采用基于验证位置误差的早停机制，替代原验证损失判断，防止过拟合&#10;- 增加早停耐心值至20，给予模型更多训练机会&#10;- 实现分阶段Teacher Forcing策略，训练前80 epoch高比率，逐步递减至0.6&#10;- 引入分阶段正则化权重调整，优先优化位置精度，逐步增强路径多样性和分散性约束&#10;- 调整位置权重，减轻前几步权重过重问题，使训练更加平衡&#10;- 验证阶段Teacher Forcing比例与训练阶段对应，降低训练推理分布差异&#10;- 统一训练与验证阶段的正则化与损失计算方法，确保一致性&#10;- 训练时保存模型改为优先考虑位置误差改善，同时兼顾损失下降&#10;- 早停判定改为基于位置误差，并打印详细的误差信息便于调试">
+      <option name="closed" value="true" />
+      <created>1768887083814</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1768887083814</updated>
+    </task>
+    <task id="LOCAL-00005" summary="feat(training): 增加加速度与方向连续性损失，优化分阶段正则化权重&#10;&#10;- 添加加速度约束损失，提升路径步长变化的平滑性&#10;- 添加方向连续性损失，强化相邻方向的相似性约束&#10;- 调整分阶段训练中正则化权重，显著提高平滑性、跳跃和方向一致性权重&#10;- 在所有训练阶段引入加速度和方向连续性权重，确保平滑性约束持续生效&#10;- 训练指标输出中新增加速度和方向连续性损失的显示&#10;- 预测损失计算与位置误差评估中同步加入新增平滑性损失，保持训练与评估一致">
+      <option name="closed" value="true" />
+      <created>1768888452945</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1768888452945</updated>
+    </task>
+    <task id="LOCAL-00006" summary="feat(training): 增加加速度与方向连续性损失，优化分阶段正则化权重&#10;&#10;- 添加加速度约束损失，提升路径步长变化的平滑性&#10;- 添加方向连续性损失，强化相邻方向的相似性约束&#10;- 调整分阶段训练中正则化权重，显著提高平滑性、跳跃和方向一致性权重&#10;- 在所有训练阶段引入加速度和方向连续性权重，确保平滑性约束持续生效&#10;- 训练指标输出中新增加速度和方向连续性损失的显示&#10;- 预测损失计算与位置误差评估中同步加入新增平滑性损失，保持训练与评估一致">
+      <option name="closed" value="true" />
+      <created>1768889565727</created>
+      <option name="number" value="00006" />
+      <option name="presentableId" value="LOCAL-00006" />
+      <option name="project" value="LOCAL" />
+      <updated>1768889565727</updated>
+    </task>
+    <task id="LOCAL-00007" summary="feat(training): 增加加速度与方向连续性损失，优化分阶段正则化权重&#10;&#10;- 添加加速度约束损失，提升路径步长变化的平滑性&#10;- 添加方向连续性损失，强化相邻方向的相似性约束&#10;- 调整分阶段训练中正则化权重，显著提高平滑性、跳跃和方向一致性权重&#10;- 在所有训练阶段引入加速度和方向连续性权重，确保平滑性约束持续生效&#10;- 训练指标输出中新增加速度和方向连续性损失的显示&#10;- 预测损失计算与位置误差评估中同步加入新增平滑性损失，保持训练与评估一致">
+      <option name="closed" value="true" />
+      <created>1768890305064</created>
+      <option name="number" value="00007" />
+      <option name="presentableId" value="LOCAL-00007" />
+      <option name="project" value="LOCAL" />
+      <updated>1768890305064</updated>
+    </task>
+    <task id="LOCAL-00008" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768891866398</created>
+      <option name="number" value="00008" />
+      <option name="presentableId" value="LOCAL-00008" />
+      <option name="project" value="LOCAL" />
+      <updated>1768891866398</updated>
+    </task>
+    <task id="LOCAL-00009" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768894402980</created>
+      <option name="number" value="00009" />
+      <option name="presentableId" value="LOCAL-00009" />
+      <option name="project" value="LOCAL" />
+      <updated>1768894402980</updated>
+    </task>
+    <task id="LOCAL-00010" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768896306617</created>
+      <option name="number" value="00010" />
+      <option name="presentableId" value="LOCAL-00010" />
+      <option name="project" value="LOCAL" />
+      <updated>1768896306617</updated>
+    </task>
+    <task id="LOCAL-00011" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768898992574</created>
+      <option name="number" value="00011" />
+      <option name="presentableId" value="LOCAL-00011" />
+      <option name="project" value="LOCAL" />
+      <updated>1768898992574</updated>
+    </task>
+    <task id="LOCAL-00012" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768901930580</created>
+      <option name="number" value="00012" />
+      <option name="presentableId" value="LOCAL-00012" />
+      <option name="project" value="LOCAL" />
+      <updated>1768901930580</updated>
+    </task>
+    <task id="LOCAL-00013" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768905148353</created>
+      <option name="number" value="00013" />
+      <option name="presentableId" value="LOCAL-00013" />
+      <option name="project" value="LOCAL" />
+      <updated>1768905148353</updated>
+    </task>
+    <task id="LOCAL-00014" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768918064884</created>
+      <option name="number" value="00014" />
+      <option name="presentableId" value="LOCAL-00014" />
+      <option name="project" value="LOCAL" />
+      <updated>1768918064884</updated>
+    </task>
+    <task id="LOCAL-00015" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768920385278</created>
+      <option name="number" value="00015" />
+      <option name="presentableId" value="LOCAL-00015" />
+      <option name="project" value="LOCAL" />
+      <updated>1768920385278</updated>
+    </task>
+    <task id="LOCAL-00016" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768921885204</created>
+      <option name="number" value="00016" />
+      <option name="presentableId" value="LOCAL-00016" />
+      <option name="project" value="LOCAL" />
+      <updated>1768921885204</updated>
+    </task>
+    <task id="LOCAL-00017" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768957787542</created>
+      <option name="number" value="00017" />
+      <option name="presentableId" value="LOCAL-00017" />
+      <option name="project" value="LOCAL" />
+      <updated>1768957787542</updated>
+    </task>
+    <task id="LOCAL-00018" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768961783023</created>
+      <option name="number" value="00018" />
+      <option name="presentableId" value="LOCAL-00018" />
+      <option name="project" value="LOCAL" />
+      <updated>1768961783023</updated>
+    </task>
+    <task id="LOCAL-00019" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768964445904</created>
+      <option name="number" value="00019" />
+      <option name="presentableId" value="LOCAL-00019" />
+      <option name="project" value="LOCAL" />
+      <updated>1768964445904</updated>
+    </task>
+    <task id="LOCAL-00020" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768967098459</created>
+      <option name="number" value="00020" />
+      <option name="presentableId" value="LOCAL-00020" />
+      <option name="project" value="LOCAL" />
+      <updated>1768967098459</updated>
+    </task>
+    <task id="LOCAL-00021" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768974264568</created>
+      <option name="number" value="00021" />
+      <option name="presentableId" value="LOCAL-00021" />
+      <option name="project" value="LOCAL" />
+      <updated>1768974264568</updated>
+    </task>
+    <task id="LOCAL-00022" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768975848282</created>
+      <option name="number" value="00022" />
+      <option name="presentableId" value="LOCAL-00022" />
+      <option name="project" value="LOCAL" />
+      <updated>1768975848282</updated>
+    </task>
+    <task id="LOCAL-00023" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768976597239</created>
+      <option name="number" value="00023" />
+      <option name="presentableId" value="LOCAL-00023" />
+      <option name="project" value="LOCAL" />
+      <updated>1768976597239</updated>
+    </task>
+    <task id="LOCAL-00024" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768983585228</created>
+      <option name="number" value="00024" />
+      <option name="presentableId" value="LOCAL-00024" />
+      <option name="project" value="LOCAL" />
+      <updated>1768983585228</updated>
+    </task>
+    <task id="LOCAL-00025" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1768988849623</created>
+      <option name="number" value="00025" />
+      <option name="presentableId" value="LOCAL-00025" />
+      <option name="project" value="LOCAL" />
+      <updated>1768988849623</updated>
+    </task>
+    <task id="LOCAL-00026" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1769148455606</created>
+      <option name="number" value="00026" />
+      <option name="presentableId" value="LOCAL-00026" />
+      <option name="project" value="LOCAL" />
+      <updated>1769148455606</updated>
+    </task>
+    <task id="LOCAL-00027" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1769150172892</created>
+      <option name="number" value="00027" />
+      <option name="presentableId" value="LOCAL-00027" />
+      <option name="project" value="LOCAL" />
+      <updated>1769150172892</updated>
+    </task>
+    <task id="LOCAL-00028" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1769151720428</created>
+      <option name="number" value="00028" />
+      <option name="presentableId" value="LOCAL-00028" />
+      <option name="project" value="LOCAL" />
+      <updated>1769151720428</updated>
+    </task>
+    <task id="LOCAL-00029" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1769152384394</created>
+      <option name="number" value="00029" />
+      <option name="presentableId" value="LOCAL-00029" />
+      <option name="project" value="LOCAL" />
+      <updated>1769152384394</updated>
+    </task>
+    <task id="LOCAL-00030" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1769155435831</created>
+      <option name="number" value="00030" />
+      <option name="presentableId" value="LOCAL-00030" />
+      <option name="project" value="LOCAL" />
+      <updated>1769155435831</updated>
+    </task>
+    <task id="LOCAL-00031" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1769392062006</created>
+      <option name="number" value="00031" />
+      <option name="presentableId" value="LOCAL-00031" />
+      <option name="project" value="LOCAL" />
+      <updated>1769392062006</updated>
+    </task>
+    <task id="LOCAL-00032" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1769406587847</created>
+      <option name="number" value="00032" />
+      <option name="presentableId" value="LOCAL-00032" />
+      <option name="project" value="LOCAL" />
+      <updated>1769406587847</updated>
+    </task>
+    <task id="LOCAL-00033" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1769406827463</created>
+      <option name="number" value="00033" />
+      <option name="presentableId" value="LOCAL-00033" />
+      <option name="project" value="LOCAL" />
+      <updated>1769406827463</updated>
+    </task>
+    <task id="LOCAL-00034" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1769419713413</created>
+      <option name="number" value="00034" />
+      <option name="presentableId" value="LOCAL-00034" />
+      <option name="project" value="LOCAL" />
+      <updated>1769419713413</updated>
+    </task>
+    <task id="LOCAL-00035" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1769427036006</created>
+      <option name="number" value="00035" />
+      <option name="presentableId" value="LOCAL-00035" />
+      <option name="project" value="LOCAL" />
+      <updated>1769427036006</updated>
+    </task>
+    <option name="localTasksCounter" value="36" />
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="TAB_STATES">
+      <map>
+        <entry key="MAIN">
+          <value>
+            <State>
+              <option name="FILTERS">
+                <map>
+                  <entry key="branch">
+                    <value>
+                      <list>
+                        <option value="main" />
+                      </list>
+                    </value>
+                  </entry>
+                </map>
+              </option>
+            </State>
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+  <component name="VcsManagerConfiguration">
+    <option name="ADD_EXTERNAL_FILES_SILENTLY" value="true" />
+    <MESSAGE value="feat(models): 添加优化版扫描路径生成模型V5&#10;&#10;- 引入更大的特征图尺寸（14x14）以保留更多空间信息&#10;- 简化注意力机制，只在关键层使用轻量注意力模块&#10;- 实现Scheduled Sampling策略替代简单Teacher Forcing&#10;- 采用自适应损失函数动态调整位置与方向权重并加入多重方向约束&#10;- 优化局部-全局特征融合与简化特征更新机制&#10;- 增加了正则化方法（Label Smoothing和DropPath）&#10;- 配置文件新增Mamba-Adaptive模型设置，支持自动停止和数据增强&#10;- 新增数据加载模块，支持训练与测试数据的数据增强与预处理&#10;- 指标模块引入余弦等多种扫描路径评估方法&#10;- 模型导入接口统一管理，方便调用与扩展" />
+    <MESSAGE value="perf(training): 优化训练策略提升模型收敛速度与效果&#10;&#10;- 提高初始学习率至1e-4，加快训练速度&#10;- 学习率衰减因子调整为0.9995，配合余弦退火调度器改善收敛&#10;- 改进Teacher Forcing策略，训练前100个epoch保持0.7，之后缓慢降至0.5&#10;- 调整Beta-VAE权重，减弱KL散度影响，保持重构损失主导&#10;- 大幅降低正则化项权重，优先优化位置预测精度&#10;- 引入加权位置误差计算，更准确反映模型性能&#10;- 验证时引入少量Teacher Forcing (0.1)以缩小训练与推理分布差异" />
+    <MESSAGE value="fix(train): 优化路径中心聚集惩罚机制并调整权重策略&#10;&#10;- 改进中心聚集惩罚，采用分阶段强度策略以更精细地惩罚预测均值靠近中心的情况&#10;- 新增点中心惩罚，直接惩罚预测点序列过于集中在中心区域&#10;- 提高覆盖范围和中心聚集惩罚的权重，解决路径过度聚集中心的问题&#10;- 设计动态权重调整方案，训练早期侧重分散性，后期平衡位置精度和路径合理性&#10;- 同步更新验证环节的中心聚集和点中心惩罚计算与训练保持一致&#10;- 增加训练过程中点中心惩罚的日志输出，便于监控惩罚项表现" />
+    <MESSAGE value="feat(train): 优化训练策略以提升位置误差表现&#10;&#10;- 采用基于验证位置误差的早停机制，替代原验证损失判断，防止过拟合&#10;- 增加早停耐心值至20，给予模型更多训练机会&#10;- 实现分阶段Teacher Forcing策略，训练前80 epoch高比率，逐步递减至0.6&#10;- 引入分阶段正则化权重调整，优先优化位置精度，逐步增强路径多样性和分散性约束&#10;- 调整位置权重，减轻前几步权重过重问题，使训练更加平衡&#10;- 验证阶段Teacher Forcing比例与训练阶段对应，降低训练推理分布差异&#10;- 统一训练与验证阶段的正则化与损失计算方法，确保一致性&#10;- 训练时保存模型改为优先考虑位置误差改善，同时兼顾损失下降&#10;- 早停判定改为基于位置误差，并打印详细的误差信息便于调试" />
+    <MESSAGE value="feat(training): 增加加速度与方向连续性损失，优化分阶段正则化权重&#10;&#10;- 添加加速度约束损失，提升路径步长变化的平滑性&#10;- 添加方向连续性损失，强化相邻方向的相似性约束&#10;- 调整分阶段训练中正则化权重，显著提高平滑性、跳跃和方向一致性权重&#10;- 在所有训练阶段引入加速度和方向连续性权重，确保平滑性约束持续生效&#10;- 训练指标输出中新增加速度和方向连续性损失的显示&#10;- 预测损失计算与位置误差评估中同步加入新增平滑性损失，保持训练与评估一致" />
+    <MESSAGE value="feat(模型改进) go on" />
+    <option name="LAST_COMMIT_MESSAGE" value="feat(模型改进) go on" />
+  </component>
+</project>
