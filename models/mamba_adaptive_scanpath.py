@@ -234,16 +234,20 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
         feat_grids_list = []
 
         for i in range(B):
+            # 在计算patch时进行严格裁剪，确保位置在有效范围内
+            # positions格式: (x, y) 其中 x是经度[0,1], y是纬度[0,1]
+            pos_x = torch.clamp(positions[i, 0], 0.0, 1.0)  # 经度
+            pos_y = torch.clamp(positions[i, 1], 0.0, 1.0)  # 纬度
+
             # 计算patch中心坐标（像素）
-            # positions: (y, x) where y is latitude [0,1], x is longitude [0,1]
-            y_center = positions[i, 0] * H - patch_size / 2  # Y坐标（纬度）
-            x_center = positions[i, 1] * W - patch_size / 2  # X坐标（经度）
+            x_center = pos_x * W - patch_size / 2  # X坐标（经度）
+            y_center = pos_y * H - patch_size / 2  # Y坐标（纬度）
 
             # Y坐标clamp（纬度不是周期性的）
             y_start = int(torch.clamp(y_center, 0, H - patch_size).item())
 
             # X坐标wrap around（经度是周期性的）
-            x_start = int(x_center) % W
+            x_start = int(x_center.item()) % W
 
             # 提取patch
             if x_start + patch_size <= W:
@@ -557,9 +561,10 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             # 计算新位置：当前位置 = 前一位置 + 位移
             pos_t = prev_pos + delta_pos  # (B, 2)
 
-            # 立即裁剪位置，防止累积误差导致NaN
-            # 这是关键修复：必须在任何后续操作之前确保位置在有效范围内
-            pos_t = torch.clamp(pos_t, 0.0, 1.0)
+            # 方案1改进：允许位置在宽松范围内累积，保持相对位移的连续性
+            # 不要在这里严格裁剪到[0,1]，而是允许一定的越界（-0.2到1.2）
+            # 这样可以保持序列的连续性，只在计算patch时才裁剪
+            pos_t = torch.clamp(pos_t, -0.2, 1.2)
 
             # ==================== Y方向注意力偏置 ====================
             # 在位置预测后，添加Y方向偏置以增加Y方向多样性
@@ -572,37 +577,21 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
 
                 # 添加偏置到Y坐标（非inplace操作，避免破坏梯度图）
                 y_coord = pos_t[:, 1] + 0.1 * y_bias.squeeze(1)
-                # 立即裁剪Y坐标，防止偏置导致越界
-                y_coord = torch.clamp(y_coord, 0.0, 1.0)
+                # 同样使用宽松裁剪
+                y_coord = torch.clamp(y_coord, -0.2, 1.2)
                 # 重新组合坐标
                 pos_t = torch.stack([pos_t[:, 0], y_coord], dim=-1)
 
-            # 改进：处理360图像的边界连续性
-            # 关键修复：对于360图像，x坐标（经度）应该wrap around，而不是clamp
-            # y坐标（纬度）：clamp到有效范围（不是周期性的）
-            pos_t_y = torch.clamp(pos_t[:, 1], 0.02, 0.98)  # 纬度：约束在[0.02, 0.98]
+            # 简化边界处理：只在最后保存位置时进行最终裁剪
+            # 对于360图像，x坐标wrap around，y坐标clamp
+            # 这里不做严格裁剪，保持位置的原始值用于序列连续性
+            # 实际的裁剪会在get_img_patches中进行
 
-            # x坐标（经度）：wrap around处理，保持周期性
-            # 对于360图像，x=0和x=1是同一个位置（左右边界连续）
-            # 使用模运算实现wrap around：x % 1.0 将值映射到[0, 1]
-            pos_t_x_raw = pos_t[:, 0]
-            # 先wrap around到[0, 1]
-            pos_t_x = pos_t_x_raw % 1.0  # wrap around到[0, 1]
-            # 然后约束在合理范围内，避免极值（0.0和1.0是同一个位置，避免使用这两个值）
-            # 如果值在[0, 0.02)或(0.98, 1]，映射到合理范围
-            # 注意：对于360图像，0.0和1.0是同一个位置，所以如果值接近这两个边界，
-            # 应该映射到另一个边界附近，而不是简单地clamp
-            pos_t_x = torch.where(
-                pos_t_x < 0.02,
-                pos_t_x + 0.98,  # 从左边wrap到右边：[0, 0.02) -> [0.98, 1.0)，但需要clamp到0.98
-                torch.where(
-                    pos_t_x > 0.98,
-                    pos_t_x - 0.98,  # 从右边wrap到左边：(0.98, 1] -> (0, 0.02]，但需要clamp到0.02
-                    pos_t_x  # 否则保持不变：[0.02, 0.98]
-                )
-            )
-            # 最终约束在[0.02, 0.98]范围内，确保数值稳定
-            pos_t_x = torch.clamp(pos_t_x, 0.02, 0.98)
+            # X坐标：wrap around处理（360度连续性）
+            pos_t_x = pos_t[:, 0] % 1.0  # 映射到[0, 1]
+
+            # Y坐标：软裁剪（允许轻微越界，但不要太远）
+            pos_t_y = torch.clamp(pos_t[:, 1], -0.1, 1.1)
 
             pos_t = torch.stack([pos_t_x, pos_t_y], dim=-1)  # (B, 2)
 
