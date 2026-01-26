@@ -570,10 +570,12 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
                 # 计算Y方向偏置
                 y_bias = self.y_attention(combined_features, history_y)  # (B, 1)
 
-                # 添加偏置到Y坐标
-                pos_t[:, 1] = pos_t[:, 1] + 0.1 * y_bias.squeeze(1)
+                # 添加偏置到Y坐标（非inplace操作，避免破坏梯度图）
+                y_coord = pos_t[:, 1] + 0.1 * y_bias.squeeze(1)
                 # 立即裁剪Y坐标，防止偏置导致越界
-                pos_t[:, 1] = torch.clamp(pos_t[:, 1], 0.0, 1.0)
+                y_coord = torch.clamp(y_coord, 0.0, 1.0)
+                # 重新组合坐标
+                pos_t = torch.stack([pos_t[:, 0], y_coord], dim=-1)
 
             # 改进：处理360图像的边界连续性
             # 关键修复：对于360图像，x坐标（经度）应该wrap around，而不是clamp
