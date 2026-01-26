@@ -164,7 +164,8 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             nn.Linear(d_model, d_model // 2)
         )
 
-        # 从隐变量解码位置（改进：使用位置信息和历史位置信息增强）
+        # 从隐变量解码位移（改进：预测相对位移而不是绝对位置）
+        # 输出范围：Tanh输出[-1, 1]，然后缩放到[-0.15, 0.15]
         self.position_decoder = nn.Sequential(
             nn.Linear(d_model // 2 + 4, d_model // 2),  # 加入当前位置和历史位置信息
             nn.LayerNorm(d_model // 2),
@@ -178,16 +179,14 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             nn.LayerNorm(d_model // 8),
             nn.GELU(),
             nn.Linear(d_model // 8, 2),
-            nn.Tanh()
+            nn.Tanh()  # 输出[-1, 1]，表示位移方向和大小
         )
 
-        # 改进初始化：让位置解码器输出更容易覆盖全范围
-        # 关键修复：初始化最后一层，让输出更容易覆盖全范围
-        # 问题：之前bias=0导致Tanh(0)=0，转换后为0.5（图像中心），导致预测聚集在中心
-        # 修复：使用更大的权重std和随机bias，让初始输出更分散
-        nn.init.normal_(self.position_decoder[-2].weight, mean=0.0, std=0.25)  # 增加std以提高多样性
-        # 随机初始化bias，让初始输出分散在整个范围内
-        nn.init.uniform_(self.position_decoder[-2].bias, -0.5, 0.5)  # 随机bias，Tanh后分布在[-0.46, 0.46]，转换后分布在[0.27, 0.73]
+        # 改进初始化：让位移解码器输出接近0（小位移）
+        # 关键修复：初始化最后一层，让初始位移较小，避免大幅跳跃
+        # 使用较小的权重std，让初始输出接近0
+        nn.init.normal_(self.position_decoder[-2].weight, mean=0.0, std=0.01)  # 小std，初始位移接近0
+        nn.init.constant_(self.position_decoder[-2].bias, 0.0)  # bias=0，Tanh(0)=0，初始位移为0
 
         # 改进：初始化logvar层，使用更合理的初始方差（增加初始多样性）
         # 注意：latent_logvar是Sequential，需要初始化最后一层的bias
@@ -538,10 +537,25 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
                 # 推理时：直接使用mu，不采样，确保确定性
                 z = mu  # (B, d_model//2)
 
-            # 从隐变量解码位置（融合当前位置和历史位置信息）
+            # ==================== 方案B：预测相对位移而不是绝对位置 ====================
+            # 关键改进：预测 (Δx, Δy) 而不是 (x, y)
+            # 优势：
+            # 1. 强制序列连续性（每一步基于前一步）
+            # 2. 更符合人类眼动本质（扫视是相对移动）
+            # 3. 减少VAE随机性的影响
+            # 4. 改善序列对齐（LEV指标）
+
+            # 从隐变量解码相对位移（融合当前位置和历史位置信息）
             z_with_pos = torch.cat([z, prev_pos, history_pos], dim=-1)  # (B, d_model//2+4)
-            pos_t = self.position_decoder(z_with_pos)  # (B, 2), 范围[-1, 1]
-            pos_t = (pos_t + 1.0) / 2.0  # 归一化到[0, 1]
+            delta_pos = self.position_decoder(z_with_pos)  # (B, 2), 范围[-1, 1]
+
+            # 将Tanh输出[-1, 1]缩放到合理的位移范围
+            # 限制最大位移为0.15（15%的图像尺寸），避免过大的跳跃
+            max_displacement = 0.15
+            delta_pos = delta_pos * max_displacement  # 范围[-0.15, 0.15]
+
+            # 计算新位置：当前位置 = 前一位置 + 位移
+            pos_t = prev_pos + delta_pos  # (B, 2)
 
             # ==================== Y方向注意力偏置 ====================
             # 在位置预测后，添加Y方向偏置以增加Y方向多样性
@@ -559,7 +573,7 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             # 关键修复：对于360图像，x坐标（经度）应该wrap around，而不是clamp
             # y坐标（纬度）：clamp到有效范围（不是周期性的）
             pos_t_y = torch.clamp(pos_t[:, 1], 0.02, 0.98)  # 纬度：约束在[0.02, 0.98]
-            
+
             # x坐标（经度）：wrap around处理，保持周期性
             # 对于360图像，x=0和x=1是同一个位置（左右边界连续）
             # 使用模运算实现wrap around：x % 1.0 将值映射到[0, 1]
@@ -581,7 +595,7 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             )
             # 最终约束在[0.02, 0.98]范围内，确保数值稳定
             pos_t_x = torch.clamp(pos_t_x, 0.02, 0.98)
-            
+
             pos_t = torch.stack([pos_t_x, pos_t_y], dim=-1)  # (B, 2)
 
             # 保存mu和logvar用于计算KL散度
@@ -618,12 +632,14 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
                         break
                 # 训练时：只计算停止概率（用于损失），但不实际停止
 
-            # Teacher Forcing
+            # Teacher Forcing（修复：相对位移模式下应该使用预测位置）
+            # 关键修复：由于现在预测的是相对位移，Teacher Forcing不应该直接替换prev_pos
+            # 而应该让模型使用自己预测的位置，只在计算损失时与GT对比
+            # 这样才能保持相对位移的连续性
             if use_teacher_forcing and t < seq_len - 1:
-                if torch.rand(1).item() < teacher_forcing_ratio:
-                    prev_pos = gt_positions[:, t + 1, :]  # 修复：应该使用下一个位置
-                else:
-                    prev_pos = pos_t.detach()
+                # 始终使用预测的位置作为下一步的输入
+                # Teacher Forcing的作用通过损失函数体现，而不是直接替换位置
+                prev_pos = pos_t.detach()
             else:
                 prev_pos = pos_t
 
