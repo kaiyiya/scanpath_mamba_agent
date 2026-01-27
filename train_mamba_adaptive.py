@@ -361,27 +361,50 @@ def train():
                 use_gt_start=True  # 使用真实起始点
             )
 
-            # ========== 修复版损失函数：增强点对点匹配，修复REC为0 ==========
-            # 1. 重构损失（准确匹配真实路径）- 使用加权MSE，前几步权重更高
-            # 关键修复：增加前几步的权重，确保起始位置准确（影响REC）
+            # ========== 修复版损失函数：添加像素级距离损失，修复REC为0 ==========
+            # 关键修复：REC为0说明预测路径和真实路径的点对点距离远超过12像素
+            # 需要添加像素级距离损失，直接约束像素距离
+            
+            # 1. 归一化坐标的重建损失（保持）
             position_weights = torch.ones(config.seq_len, device=predicted_scanpaths.device)
             position_weights[0] = 3.0  # 第一步权重最高
             position_weights[1:5] = 2.0  # 前5步权重较高
             position_weights[5:10] = 1.5  # 5-10步权重适中
             position_weights = position_weights.unsqueeze(0).unsqueeze(-1)  # (1, seq_len, 1)
             
-            # 加权MSE损失
+            # 加权MSE损失（归一化坐标）
             squared_errors = (predicted_scanpaths - true_scanpaths) ** 2  # (B, T, 2)
             weighted_errors = squared_errors * position_weights  # (B, T, 2)
-            reconstruction_loss = weighted_errors.mean()
+            reconstruction_loss_norm = weighted_errors.mean()
             
-            # 额外的点对点距离损失（L1损失，更关注精确匹配）
-            point_wise_l1 = torch.abs(predicted_scanpaths - true_scanpaths)  # (B, T, 2)
-            point_wise_l1_weighted = point_wise_l1 * position_weights  # (B, T, 2)
-            point_wise_loss = point_wise_l1_weighted.mean()
+            # 2. 像素级距离损失（关键修复：直接约束像素距离）
+            # 转换为像素坐标
+            h, w = config.image_size
+            pred_pixels = predicted_scanpaths.clone()
+            pred_pixels[:, :, 0] = pred_pixels[:, :, 0] * w  # X坐标
+            pred_pixels[:, :, 1] = pred_pixels[:, :, 1] * h  # Y坐标
             
-            # 组合重建损失（MSE + L1）
-            reconstruction_loss = reconstruction_loss + 0.5 * point_wise_loss
+            true_pixels = true_scanpaths.clone()
+            true_pixels[:, :, 0] = true_pixels[:, :, 0] * w  # X坐标
+            true_pixels[:, :, 1] = true_pixels[:, :, 1] * h  # Y坐标
+            
+            # 计算像素距离
+            pixel_distances = torch.norm(pred_pixels - true_pixels, p=2, dim=-1)  # (B, T)
+            
+            # REC风格的损失：惩罚距离超过阈值的点
+            # 阈值12像素（REC的阈值）
+            rec_threshold = 12.0
+            # 对于距离>12像素的点，使用平方惩罚
+            rec_penalty = torch.mean((pixel_distances - rec_threshold).clamp(min=0.0) ** 2)
+            
+            # 像素级MSE损失（所有点）
+            pixel_mse = torch.mean((pred_pixels - true_pixels) ** 2)
+            
+            # 像素级L1损失（更关注精确匹配）
+            pixel_l1 = torch.mean(torch.abs(pred_pixels - true_pixels))
+            
+            # 组合重建损失：归一化坐标损失 + 像素级损失
+            reconstruction_loss = reconstruction_loss_norm + 0.01 * pixel_mse + 0.01 * pixel_l1 + 0.1 * rec_penalty
 
             # 2. KL散度正则化（降低权重，减少随机性）
             kl_loss = -0.5 * torch.sum(1 + logvars - mus.pow(2) - logvars.exp())
@@ -412,49 +435,49 @@ def train():
                 above_boundary * (predicted_scanpaths - boundary_max) ** 2
             )
 
-            # ========== 修复版损失权重：平衡训练稳定性和序列对齐 ==========
+            # ========== 修复版损失权重：平衡训练稳定性和点对点匹配 ==========
             # 关键修复：
-            # 1. 降低sequence_alignment权重，避免训练不稳定（从8-10降到5-7）
-            # 2. 大幅提高reconstruction权重，确保点对点匹配（修复REC为0）
-            # 3. 适度提高motion_consistency，改善序列连续性
+            # 1. 保持reconstruction权重适中，因为已经添加了像素级损失
+            # 2. 降低sequence_alignment权重，避免训练不稳定
+            # 3. 适度提高motion_consistency权重，改善序列连续性
             # 4. 降低KL权重，减少随机性
             # 5. 渐进式权重调整，确保训练稳定
             if epoch <= 10:
-                # 早期：重点学习点对点匹配和基础位置预测
+                # 早期：重点学习点对点匹配
                 weights = {
-                    'reconstruction': 8.0,  # 大幅提高，确保点对点匹配（修复REC为0）
+                    'reconstruction': 5.0,  # 适中权重（因为已有像素级损失）
                     'kl': 0.0003,  # 进一步降低KL，减少随机性
-                    'spatial_coverage': 0.8,  # 降低，避免过度约束
-                    'trajectory_smoothness': 0.15,  # 降低，允许更灵活的路径
-                    'direction_consistency': 0.15,  # 降低，避免过度约束
-                    'sequence_alignment': 5.0,  # 降低，避免训练不稳定
-                    'motion_consistency': 0.2,  # 适度运动连续性
-                    'boundary': 0.15
+                    'spatial_coverage': 0.5,  # 降低，避免过度约束
+                    'trajectory_smoothness': 0.1,  # 降低，允许更灵活的路径
+                    'direction_consistency': 0.1,  # 降低，避免过度约束
+                    'sequence_alignment': 3.0,  # 降低，避免训练不稳定
+                    'motion_consistency': 0.15,  # 适度运动连续性
+                    'boundary': 0.1
                 }
             elif epoch <= 25:
                 # 中期：平衡各项损失
                 progress = (epoch - 10) / 15.0
                 weights = {
-                    'reconstruction': 8.0 - 1.0 * progress,  # 逐渐降低到7.0
+                    'reconstruction': 5.0 - 0.5 * progress,  # 逐渐降低到4.5
                     'kl': 0.0003 + 0.0004 * progress,  # 逐渐增加到0.0007
-                    'spatial_coverage': 0.8 + 0.7 * progress,  # 逐渐增加到1.5
-                    'trajectory_smoothness': 0.15 + 0.25 * progress,  # 逐渐增加到0.4
-                    'direction_consistency': 0.15 + 0.25 * progress,  # 逐渐增加到0.4
-                    'sequence_alignment': 5.0 + 1.5 * progress,  # 逐渐增加到6.5
-                    'motion_consistency': 0.2 + 0.4 * progress,  # 逐渐增加到0.6
-                    'boundary': 0.15
+                    'spatial_coverage': 0.5 + 0.5 * progress,  # 逐渐增加到1.0
+                    'trajectory_smoothness': 0.1 + 0.2 * progress,  # 逐渐增加到0.3
+                    'direction_consistency': 0.1 + 0.2 * progress,  # 逐渐增加到0.3
+                    'sequence_alignment': 3.0 + 1.0 * progress,  # 逐渐增加到4.0
+                    'motion_consistency': 0.15 + 0.35 * progress,  # 逐渐增加到0.5
+                    'boundary': 0.1
                 }
             else:
-                # 后期：精细调优，保持高重建权重
+                # 后期：精细调优
                 weights = {
-                    'reconstruction': 7.0,  # 最终权重（高，确保点对点匹配）
+                    'reconstruction': 4.5,  # 最终权重（适中，因为已有像素级损失）
                     'kl': 0.0007,  # 最终权重（低，减少随机性）
-                    'spatial_coverage': 1.5,  # 最终权重
-                    'trajectory_smoothness': 0.4,  # 最终权重
-                    'direction_consistency': 0.4,  # 最终权重
-                    'sequence_alignment': 6.5,  # 最终权重（适中，避免不稳定）
-                    'motion_consistency': 0.6,  # 最终权重
-                    'boundary': 0.15
+                    'spatial_coverage': 1.0,  # 最终权重
+                    'trajectory_smoothness': 0.3,  # 最终权重
+                    'direction_consistency': 0.3,  # 最终权重
+                    'sequence_alignment': 4.0,  # 最终权重（适中，避免不稳定）
+                    'motion_consistency': 0.5,  # 最终权重
+                    'boundary': 0.1
                 }
 
             # 计算总损失（添加motion_consistency项）
@@ -550,7 +573,7 @@ def train():
                     logvars = result[2]
 
                     # ========== 修复版验证损失（与训练一致）==========
-                    # 1. 重构损失（使用加权MSE，与训练一致）
+                    # 1. 重构损失（使用加权MSE + 像素级损失，与训练一致）
                     position_weights = torch.ones(config.seq_len, device=predicted_scanpaths.device)
                     position_weights[0] = 3.0
                     position_weights[1:5] = 2.0
@@ -559,13 +582,25 @@ def train():
                     
                     squared_errors = (predicted_scanpaths - true_scanpaths) ** 2
                     weighted_errors = squared_errors * position_weights
-                    reconstruction_loss = weighted_errors.mean()
+                    reconstruction_loss_norm = weighted_errors.mean()
                     
-                    point_wise_l1 = torch.abs(predicted_scanpaths - true_scanpaths)
-                    point_wise_l1_weighted = point_wise_l1 * position_weights
-                    point_wise_loss = point_wise_l1_weighted.mean()
+                    # 像素级距离损失
+                    h, w = config.image_size
+                    pred_pixels = predicted_scanpaths.clone()
+                    pred_pixels[:, :, 0] = pred_pixels[:, :, 0] * w
+                    pred_pixels[:, :, 1] = pred_pixels[:, :, 1] * h
                     
-                    reconstruction_loss = reconstruction_loss + 0.5 * point_wise_loss
+                    true_pixels = true_scanpaths.clone()
+                    true_pixels[:, :, 0] = true_pixels[:, :, 0] * w
+                    true_pixels[:, :, 1] = true_pixels[:, :, 1] * h
+                    
+                    pixel_distances = torch.norm(pred_pixels - true_pixels, p=2, dim=-1)
+                    rec_threshold = 12.0
+                    rec_penalty = torch.mean((pixel_distances - rec_threshold).clamp(min=0.0) ** 2)
+                    pixel_mse = torch.mean((pred_pixels - true_pixels) ** 2)
+                    pixel_l1 = torch.mean(torch.abs(pred_pixels - true_pixels))
+                    
+                    reconstruction_loss = reconstruction_loss_norm + 0.01 * pixel_mse + 0.01 * pixel_l1 + 0.1 * rec_penalty
 
                     # 2. KL散度正则化
                     kl_loss = -0.5 * torch.sum(1 + logvars - mus.pow(2) - logvars.exp())
@@ -599,37 +634,37 @@ def train():
                     # 使用与训练相同的权重（修复版）
                     if epoch <= 10:
                         weights = {
-                            'reconstruction': 8.0,
+                            'reconstruction': 5.0,
                             'kl': 0.0003,
-                            'spatial_coverage': 0.8,
-                            'trajectory_smoothness': 0.15,
-                            'direction_consistency': 0.15,
-                            'sequence_alignment': 5.0,
-                            'motion_consistency': 0.2,
-                            'boundary': 0.15
+                            'spatial_coverage': 0.5,
+                            'trajectory_smoothness': 0.1,
+                            'direction_consistency': 0.1,
+                            'sequence_alignment': 3.0,
+                            'motion_consistency': 0.15,
+                            'boundary': 0.1
                         }
                     elif epoch <= 25:
                         progress = (epoch - 10) / 15.0
                         weights = {
-                            'reconstruction': 8.0 - 1.0 * progress,
+                            'reconstruction': 5.0 - 0.5 * progress,
                             'kl': 0.0003 + 0.0004 * progress,
-                            'spatial_coverage': 0.8 + 0.7 * progress,
-                            'trajectory_smoothness': 0.15 + 0.25 * progress,
-                            'direction_consistency': 0.15 + 0.25 * progress,
-                            'sequence_alignment': 5.0 + 1.5 * progress,
-                            'motion_consistency': 0.2 + 0.4 * progress,
-                            'boundary': 0.15
+                            'spatial_coverage': 0.5 + 0.5 * progress,
+                            'trajectory_smoothness': 0.1 + 0.2 * progress,
+                            'direction_consistency': 0.1 + 0.2 * progress,
+                            'sequence_alignment': 3.0 + 1.0 * progress,
+                            'motion_consistency': 0.15 + 0.35 * progress,
+                            'boundary': 0.1
                         }
                     else:
                         weights = {
-                            'reconstruction': 7.0,
+                            'reconstruction': 4.5,
                             'kl': 0.0007,
-                            'spatial_coverage': 1.5,
-                            'trajectory_smoothness': 0.4,
-                            'direction_consistency': 0.4,
-                            'sequence_alignment': 6.5,
-                            'motion_consistency': 0.6,
-                            'boundary': 0.15
+                            'spatial_coverage': 1.0,
+                            'trajectory_smoothness': 0.3,
+                            'direction_consistency': 0.3,
+                            'sequence_alignment': 4.0,
+                            'motion_consistency': 0.5,
+                            'boundary': 0.1
                         }
 
                     # 计算总损失（包含motion_consistency项）
