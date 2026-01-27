@@ -19,33 +19,36 @@ import math
 
 def compute_teacher_forcing_ratio(epoch, step_idx=None):
     """
-    改进的Teacher Forcing策略（平衡版本）
-    快速验证版本：适应50个epoch
+    优化的Teacher Forcing策略（改善训练稳定性）
+    
+    改进点：
+    1. 更慢的衰减速度，避免训练不稳定
+    2. 保持较高的最终比例，减少训练和推理差异
+    3. 更平滑的步级衰减
 
     Args:
         epoch: 当前训练轮次
         step_idx: 当前序列中的步骤索引（0-29），用于前几步保持高TF
     """
-    initial_ratio = 0.8  # 降低初始比例（从0.9到0.8）
-    final_ratio = 0.2  # 降低最终比例（从0.5到0.2），让模型学会自主生成
-    decay_epochs = 50  # 调整为50 epoch
+    initial_ratio = 0.9  # 提高初始比例，确保早期训练稳定
+    final_ratio = 0.4  # 提高最终比例（从0.2到0.4），减少训练和推理差异
+    decay_epochs = 50  # 50 epoch
 
-    # 指数衰减: ratio = 0.8 * exp(-k * epoch)
-    k = -math.log(final_ratio / initial_ratio) / decay_epochs
-    base_ratio = initial_ratio * math.exp(-k * epoch)
+    # 线性衰减（更稳定）：ratio = initial - (initial - final) * (epoch / decay_epochs)
+    base_ratio = initial_ratio - (initial_ratio - final_ratio) * min(epoch / decay_epochs, 1.0)
     base_ratio = max(base_ratio, final_ratio)
 
-    # 前几步平滑衰减（而不是突变）
+    # 前几步平滑衰减（更保守的策略）
     if step_idx is not None:
         if step_idx < 3:
-            # 前3步：额外+0.15
-            return min(base_ratio + 0.15, 0.95)
+            # 前3步：额外+0.1，确保起始稳定
+            return min(base_ratio + 0.1, 0.95)
         elif step_idx < 6:
-            # 3-6步：额外+0.08
-            return min(base_ratio + 0.08, 0.90)
+            # 3-6步：额外+0.05
+            return min(base_ratio + 0.05, 0.90)
         elif step_idx < 10:
-            # 6-10步：额外+0.03
-            return min(base_ratio + 0.03, 0.85)
+            # 6-10步：额外+0.02
+            return min(base_ratio + 0.02, 0.85)
 
     return base_ratio
 
@@ -276,19 +279,36 @@ def train():
         weight_decay=config.weight_decay
     )
 
-    # 学习率调度器 - 使用余弦退火（更好的收敛性）
-    # 训练目标：学习率在前半程较高（快速学习），后半程较低（精细调优）
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    # 学习率调度器 - 使用带warmup的余弦退火（改善训练稳定性）
+    # 优化：添加warmup阶段，避免早期训练不稳定
+    warmup_epochs = 5
+    
+    # 使用SequentialLR组合warmup和余弦退火
+    # Warmup调度器（用于前warmup_epochs个epoch）
+    def lr_lambda_warmup(epoch):
+        return (epoch + 1) / warmup_epochs  # 线性warmup
+    
+    warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda_warmup)
+    
+    # 余弦退火调度器（用于warmup之后的epoch）
+    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=config.num_epochs,
-        eta_min=config.learning_rate * 0.01  # 最小学习率为初始的1%
+        T_max=config.num_epochs - warmup_epochs,
+        eta_min=config.learning_rate * 0.05  # 最小学习率为初始的5%（提高，避免学习率过小）
+    )
+    
+    # 组合调度器
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[warmup_epochs]
     )
 
     # 早停机制：基于验证位置误差而不是损失
-    # 快速验证配置：减少patience
+    # 优化：增加patience，避免过早停止
     best_val_position_error = float('inf')
     patience_counter = 0
-    early_stopping_patience = 10  # 减少到10（从20），快速止损
+    early_stopping_patience = 15  # 增加到15，给模型更多训练机会
     best_val_loss = float('inf')  # 仍然记录，但用于保存模型
 
     # 训练日志
@@ -371,46 +391,49 @@ def train():
                 above_boundary * (predicted_scanpaths - boundary_max) ** 2
             )
 
-            # ========== 方案A优化：回退到绝对位置 + 降低VAE随机性 + 增强序列对齐 ==========
+            # ========== 优化版损失权重：平衡各项损失，改善训练稳定性 ==========
             # 改进策略：
-            # 1. 回退到绝对位置预测（相对位移导致LEV恶化）
-            # 2. 降低VAE随机性（temperature=0.3）
-            # 3. 大幅增强sequence_alignment权重（2.0 → 5.0）
-            # 4. 进一步降低KL权重（0.001 → 0.0005），配合低temperature
-            # 5. 保持其他有效的权重配置
-            if epoch <= 20:
+            # 1. 降低sequence_alignment权重，避免过度约束导致路径"卡住"
+            # 2. 提高motion_consistency权重，改善序列连续性
+            # 3. 平衡reconstruction和sequence_alignment，避免冲突
+            # 4. 适度提高KL权重，增加模型多样性
+            # 5. 渐进式权重调整，避免训练不稳定
+            if epoch <= 15:
+                # 早期：重点学习基本位置预测
                 weights = {
-                    'reconstruction': 3.0,  # 保持适中，减少过拟合
-                    'kl': 0.0005,  # 降低（从0.001到0.0005），配合低temperature
-                    'spatial_coverage': 2.0,  # 保持高，鼓励探索
-                    'trajectory_smoothness': 0.1,  # 保持低，允许大步长
-                    'direction_consistency': 0.2,  # 保持适中
-                    'sequence_alignment': 5.0,  # 大幅提高（从2.0到5.0），改善LEV
-                    'motion_consistency': 0.05,  # 保持低
-                    'boundary': 0.2
+                    'reconstruction': 5.0,  # 提高基础重建损失
+                    'kl': 0.001,  # 适度增加KL，保持多样性
+                    'spatial_coverage': 1.5,  # 降低，避免过度约束
+                    'trajectory_smoothness': 0.3,  # 提高，改善平滑性
+                    'direction_consistency': 0.3,  # 提高，改善方向一致性
+                    'sequence_alignment': 3.0,  # 降低，避免过度约束
+                    'motion_consistency': 0.5,  # 大幅提高，改善运动连续性
+                    'boundary': 0.3
                 }
-            elif epoch <= 40:
-                progress = (epoch - 20) / 20.0
+            elif epoch <= 30:
+                # 中期：平衡各项损失
+                progress = (epoch - 15) / 15.0
                 weights = {
-                    'reconstruction': 3.0 + 0.5 * progress,  # 逐渐增加到3.5
-                    'kl': 0.0005 + 0.0005 * progress,  # 逐渐增加到0.001
-                    'spatial_coverage': 2.0 + 0.5 * progress,  # 逐渐增加到2.5
-                    'trajectory_smoothness': 0.1,
-                    'direction_consistency': 0.2,
-                    'sequence_alignment': 5.0 + 2.0 * progress,  # 逐渐增加到7.0
-                    'motion_consistency': 0.05 + 0.05 * progress,  # 逐渐增加到0.1
-                    'boundary': 0.2
+                    'reconstruction': 5.0 - 1.0 * progress,  # 逐渐降低到4.0
+                    'kl': 0.001 + 0.001 * progress,  # 逐渐增加到0.002
+                    'spatial_coverage': 1.5 + 0.5 * progress,  # 逐渐增加到2.0
+                    'trajectory_smoothness': 0.3 + 0.2 * progress,  # 逐渐增加到0.5
+                    'direction_consistency': 0.3 + 0.2 * progress,  # 逐渐增加到0.5
+                    'sequence_alignment': 3.0 + 1.0 * progress,  # 逐渐增加到4.0
+                    'motion_consistency': 0.5 + 0.3 * progress,  # 逐渐增加到0.8
+                    'boundary': 0.3
                 }
             else:
+                # 后期：精细调优
                 weights = {
-                    'reconstruction': 3.5,  # 最终权重（适中）
-                    'kl': 0.001,  # 最终权重（低）
-                    'spatial_coverage': 2.5,  # 最终权重（高）
-                    'trajectory_smoothness': 0.1,  # 保持低
-                    'direction_consistency': 0.2,
-                    'sequence_alignment': 7.0,  # 最终权重（非常高）
-                    'motion_consistency': 0.1,
-                    'boundary': 0.2
+                    'reconstruction': 4.0,  # 最终权重
+                    'kl': 0.002,  # 最终权重（适度增加多样性）
+                    'spatial_coverage': 2.0,  # 最终权重
+                    'trajectory_smoothness': 0.5,  # 最终权重
+                    'direction_consistency': 0.5,  # 最终权重
+                    'sequence_alignment': 4.0,  # 最终权重（降低，避免过度约束）
+                    'motion_consistency': 0.8,  # 最终权重（提高，改善连续性）
+                    'boundary': 0.3
                 }
 
             # 计算总损失（添加motion_consistency项）
@@ -490,8 +513,8 @@ def train():
                     true_scanpaths = batch['scanpath'].to(config.device)
 
                     # 前向传播 - 验证模式
-                    # 平衡版本：验证时使用更低的Teacher Forcing
-                    val_teacher_forcing = max(0.1, teacher_forcing_ratio * 0.3)
+                    # 优化：验证时使用与训练更接近的Teacher Forcing，减少分布差异
+                    val_teacher_forcing = max(0.3, teacher_forcing_ratio * 0.7)  # 提高验证时TF比例
                     result = model(images, gt_scanpaths=true_scanpaths,
                                    teacher_forcing_ratio=val_teacher_forcing,
                                    enable_early_stop=False,
@@ -521,7 +544,10 @@ def train():
                     # 6. 序列对齐损失
                     sequence_alignment_loss = compute_sequence_alignment_loss(predicted_scanpaths, true_scanpaths)
 
-                    # 7. 边界约束
+                    # 7. 运动一致性损失
+                    motion_consistency_loss = compute_motion_consistency_loss(predicted_scanpaths, true_scanpaths)
+
+                    # 8. 边界约束
                     boundary_min = 0.02
                     boundary_max = 0.98
                     below_boundary = (predicted_scanpaths < boundary_min).float()
@@ -531,40 +557,43 @@ def train():
                         above_boundary * (predicted_scanpaths - boundary_max) ** 2
                     )
 
-                    # 使用与训练相同的权重（方案A - 改进版）
-                    if epoch <= 20:
+                    # 使用与训练相同的权重（优化版）
+                    if epoch <= 15:
                         weights = {
-                            'reconstruction': 2.0,
-                            'kl': 0.003,
-                            'spatial_coverage': 2.0,
+                            'reconstruction': 5.0,
+                            'kl': 0.001,
+                            'spatial_coverage': 1.5,
                             'trajectory_smoothness': 0.3,
                             'direction_consistency': 0.3,
-                            'sequence_alignment': 1.5,
-                            'boundary': 0.2
+                            'sequence_alignment': 3.0,
+                            'motion_consistency': 0.5,
+                            'boundary': 0.3
                         }
-                    elif epoch <= 40:
-                        progress = (epoch - 20) / 20.0
+                    elif epoch <= 30:
+                        progress = (epoch - 15) / 15.0
                         weights = {
-                            'reconstruction': 2.0 + 0.5 * progress,
-                            'kl': 0.003,
-                            'spatial_coverage': 2.0 + 0.5 * progress,
-                            'trajectory_smoothness': 0.3,
-                            'direction_consistency': 0.3,
-                            'sequence_alignment': 1.5 + 0.5 * progress,
-                            'boundary': 0.2
+                            'reconstruction': 5.0 - 1.0 * progress,
+                            'kl': 0.001 + 0.001 * progress,
+                            'spatial_coverage': 1.5 + 0.5 * progress,
+                            'trajectory_smoothness': 0.3 + 0.2 * progress,
+                            'direction_consistency': 0.3 + 0.2 * progress,
+                            'sequence_alignment': 3.0 + 1.0 * progress,
+                            'motion_consistency': 0.5 + 0.3 * progress,
+                            'boundary': 0.3
                         }
                     else:
                         weights = {
-                            'reconstruction': 2.5,
-                            'kl': 0.003,
-                            'spatial_coverage': 2.5,
-                            'trajectory_smoothness': 0.3,
-                            'direction_consistency': 0.3,
-                            'sequence_alignment': 2.0,
-                            'boundary': 0.2
+                            'reconstruction': 4.0,
+                            'kl': 0.002,
+                            'spatial_coverage': 2.0,
+                            'trajectory_smoothness': 0.5,
+                            'direction_consistency': 0.5,
+                            'sequence_alignment': 4.0,
+                            'motion_consistency': 0.8,
+                            'boundary': 0.3
                         }
 
-                    # 计算总损失（移除batch_diversity项）
+                    # 计算总损失（包含motion_consistency项）
                     loss = (
                             weights['reconstruction'] * reconstruction_loss +
                             weights['kl'] * kl_loss +
@@ -572,6 +601,7 @@ def train():
                             weights['trajectory_smoothness'] * trajectory_smoothness_loss +
                             weights['direction_consistency'] * direction_consistency_loss +
                             weights['sequence_alignment'] * sequence_alignment_loss +
+                            weights['motion_consistency'] * motion_consistency_loss +
                             weights['boundary'] * boundary_penalty
                     )
 
@@ -672,7 +702,7 @@ def train():
         with open(log_path, 'w') as f:
             json.dump(training_log, f, indent=2)
 
-        # 学习率衰减（每个epoch结束后）
+        # 学习率调度（每个epoch结束后）
         scheduler.step()
 
     print("\n训练完成！")

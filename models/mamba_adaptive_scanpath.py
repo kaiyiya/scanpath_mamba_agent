@@ -475,15 +475,15 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             # 8. 累积历史特征
             history_features.append(current_feature.squeeze(1))  # (B, C)
 
-            # 9. Mamba序列建模（改进：使用累积的历史序列）
-            # 关键改进：让Mamba看到完整的历史序列，而不是只看到当前时间步
+            # 9. Mamba序列建模（优化：使用更长的历史序列，充分利用Mamba的长期依赖能力）
+            # 关键优化：增加历史序列长度，让Mamba看到更多上下文
             if t == 0:
                 # 第一步：只有一个时间步
                 history_seq = current_feature  # (B, 1, C)
             else:
-                # 后续步骤：累积历史序列（使用最近的历史，避免过长）
-                # 修复：history_features是列表，每个元素是(B, C)，应该用dim=0来stack
-                recent_history = history_features[-min(10, t + 1):]  # 最多使用最近10步
+                # 后续步骤：累积历史序列（使用更长的历史，充分利用Mamba能力）
+                # 优化：从10步增加到20步，让Mamba看到更多历史信息
+                recent_history = history_features[-min(20, t + 1):]  # 最多使用最近20步
                 history_seq = torch.stack(recent_history, dim=0)  # (T, B, C)
                 history_seq = history_seq.transpose(0, 1)  # (B, T, C)
 
@@ -524,21 +524,18 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             mu = self.latent_mu(features_with_pos)  # (B, d_model//2)
             logvar = self.latent_logvar(features_with_pos)  # (B, d_model//2)
 
-            # 改进：动态调整logvar，确保有足够的多样性
-            # 关键修复：放宽logvar的下限，允许更大的多样性
-            # 问题：之前min=-3.0对应std≈0.05，太小，导致采样过于集中
-            # 修复：降低下限到-2.0，对应std≈0.37，增加多样性
-            logvar = torch.clamp(logvar, min=-2.0, max=2.0)  # 限制logvar范围，确保std在[0.37, 2.7]
+            # 优化：动态调整logvar，确保有足够的多样性但不过度
+            # 改进：使用更合理的logvar范围，平衡确定性和多样性
+            logvar = torch.clamp(logvar, min=-1.5, max=1.5)  # 限制logvar范围，确保std在[0.22, 2.12]
 
-            # 方案2：降低VAE随机性，改善序列对齐
-            # 训练时也减少随机性，使用更确定性的采样
+            # 优化：统一训练和推理的采样策略，减少分布差异
+            # 改进：推理时也使用采样，但使用较低的temperature，保持训练和推理一致性
             if self.training:
-                # 训练时：使用较低的temperature，减少随机性
-                # temperature=0.5意味着std减半，更接近确定性
-                z = self.reparameterize(mu, logvar, temperature=0.3)  # (B, d_model//2)
+                # 训练时：使用适中的temperature，保持多样性
+                z = self.reparameterize(mu, logvar, temperature=0.8)  # 提高temperature，增加多样性
             else:
-                # 推理时：直接使用mu，完全确定性
-                z = mu  # (B, d_model//2)
+                # 推理时：使用较低的temperature，减少随机性但保持一致性
+                z = self.reparameterize(mu, logvar, temperature=0.5)  # 使用采样而不是完全确定性
 
             # ==================== 方案B：预测相对位移而不是绝对位置 ====================
             # 回退到绝对位置预测（相对位移预测导致LEV恶化）

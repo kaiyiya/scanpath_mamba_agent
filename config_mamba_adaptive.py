@@ -31,12 +31,12 @@ class MambaAdaptiveConfig:
     stop_threshold = 0.5  # 停止阈值，继续概率低于此值时停止
     min_steps = 5  # 最小步数，至少生成这么多步才允许停止
 
-    # 训练参数（快速验证配置）
-    batch_size = 16  # 增加batch size（从8到16），加快训练速度
-    num_epochs = 50  # 大幅减少epoch（从300到50），快速验证效果
-    learning_rate = 2e-4  # 提高学习率（从1e-4到2e-4），加快收敛
-    weight_decay = 2e-3  # 增加权重衰减（从1e-3提升到2e-3）
-    lr_decay = 0.995  # 学习率衰减因子（从0.9995调整为0.995，更快的衰减）
+    # 训练参数（优化配置）
+    batch_size = 16  # 保持batch size
+    num_epochs = 50  # 保持50 epoch
+    learning_rate = 1.5e-4  # 降低学习率（从2e-4到1.5e-4），改善训练稳定性
+    weight_decay = 1.5e-3  # 降低权重衰减（从2e-3到1.5e-3），减少过拟合风险
+    lr_decay = 0.995  # 学习率衰减因子（保持）
 
     # 数据增强
     use_augmentation = True  # 启用数据增强

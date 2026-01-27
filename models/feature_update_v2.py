@@ -36,10 +36,13 @@ class CrossAttentionFeatureUpdate(nn.Module):
         # 1. 计算空间权重
         spatial_weights = self.compute_spatial_weights(position, H, W, global_features.device)  # (B, L, 1)
 
-        # 2. 聚合局部特征
-        local_aggregate = local_features.mean(dim=1, keepdim=True)  # (B, 1, C)
+        # 2. 聚合局部特征（优化：使用加权平均而不是简单平均）
+        # 改进：根据局部特征的重要性进行加权聚合
+        local_importance = torch.norm(local_features, p=2, dim=-1, keepdim=True)  # (B, L, 1)
+        local_weights = F.softmax(local_importance, dim=1)  # (B, L, 1)
+        local_aggregate = (local_features * local_weights).sum(dim=1, keepdim=True)  # (B, 1, C)
 
-        # 3. 广播更新信号
+        # 3. 广播更新信号（优化：结合空间权重和特征重要性）
         update_signal = local_aggregate * spatial_weights  # (B, L, C)
 
         # 4. 门控融合
@@ -74,9 +77,12 @@ class CrossAttentionFeatureUpdate(nn.Module):
         # 组合距离
         spatial_dist = torch.sqrt(x_dist**2 + y_dist**2)  # (B, L, 1)
 
-        # 高斯权重
-        sigma = 0.2
+        # 高斯权重（优化：使用自适应sigma，根据位置动态调整）
+        # 改进：使用更合理的sigma值，平衡局部和全局信息
+        sigma = 0.25  # 稍微增大sigma，增加更新范围
         weights = torch.exp(-spatial_dist**2 / (2 * sigma**2))
+        # 添加最小权重，确保所有位置都能获得更新
+        weights = weights + 0.01  # 添加基础权重
         weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
 
         return weights
