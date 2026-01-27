@@ -272,11 +272,13 @@ def train():
     model = MambaAdaptiveScanpath(config).to(config.device)
     print(f"模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
 
-    # 优化器
+    # 优化器（修复：添加betas参数，改善训练稳定性）
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.learning_rate,
-        weight_decay=config.weight_decay
+        weight_decay=config.weight_decay,
+        betas=(0.9, 0.999),  # 默认值，但显式指定
+        eps=1e-8  # 默认值，但显式指定
     )
 
     # 学习率调度器 - 使用带warmup的余弦退火（改善训练稳定性）
@@ -359,9 +361,27 @@ def train():
                 use_gt_start=True  # 使用真实起始点
             )
 
-            # ========== 方案A：精确复制路径的损失函数 ==========
-            # 1. 重构损失（准确匹配真实路径）- 提高权重
-            reconstruction_loss = nn.functional.mse_loss(predicted_scanpaths, true_scanpaths)
+            # ========== 修复版损失函数：增强点对点匹配，修复REC为0 ==========
+            # 1. 重构损失（准确匹配真实路径）- 使用加权MSE，前几步权重更高
+            # 关键修复：增加前几步的权重，确保起始位置准确（影响REC）
+            position_weights = torch.ones(config.seq_len, device=predicted_scanpaths.device)
+            position_weights[0] = 3.0  # 第一步权重最高
+            position_weights[1:5] = 2.0  # 前5步权重较高
+            position_weights[5:10] = 1.5  # 5-10步权重适中
+            position_weights = position_weights.unsqueeze(0).unsqueeze(-1)  # (1, seq_len, 1)
+            
+            # 加权MSE损失
+            squared_errors = (predicted_scanpaths - true_scanpaths) ** 2  # (B, T, 2)
+            weighted_errors = squared_errors * position_weights  # (B, T, 2)
+            reconstruction_loss = weighted_errors.mean()
+            
+            # 额外的点对点距离损失（L1损失，更关注精确匹配）
+            point_wise_l1 = torch.abs(predicted_scanpaths - true_scanpaths)  # (B, T, 2)
+            point_wise_l1_weighted = point_wise_l1 * position_weights  # (B, T, 2)
+            point_wise_loss = point_wise_l1_weighted.mean()
+            
+            # 组合重建损失（MSE + L1）
+            reconstruction_loss = reconstruction_loss + 0.5 * point_wise_loss
 
             # 2. KL散度正则化（降低权重，减少随机性）
             kl_loss = -0.5 * torch.sum(1 + logvars - mus.pow(2) - logvars.exp())
@@ -392,49 +412,49 @@ def train():
                 above_boundary * (predicted_scanpaths - boundary_max) ** 2
             )
 
-            # ========== 修复版损失权重：恢复序列对齐能力，修复REC为0的严重问题 ==========
+            # ========== 修复版损失权重：平衡训练稳定性和序列对齐 ==========
             # 关键修复：
-            # 1. 大幅提高sequence_alignment权重，恢复序列对齐能力（REC为0是严重问题）
-            # 2. 保持reconstruction权重，确保基础位置预测
+            # 1. 降低sequence_alignment权重，避免训练不稳定（从8-10降到5-7）
+            # 2. 大幅提高reconstruction权重，确保点对点匹配（修复REC为0）
             # 3. 适度提高motion_consistency，改善序列连续性
-            # 4. 降低KL权重，减少随机性，改善序列对齐
+            # 4. 降低KL权重，减少随机性
             # 5. 渐进式权重调整，确保训练稳定
             if epoch <= 10:
-                # 早期：重点学习序列对齐和基础位置预测
+                # 早期：重点学习点对点匹配和基础位置预测
                 weights = {
-                    'reconstruction': 4.0,  # 基础重建损失
-                    'kl': 0.0005,  # 降低KL，减少随机性，改善对齐
-                    'spatial_coverage': 1.0,  # 降低，避免过度约束
-                    'trajectory_smoothness': 0.2,  # 适度平滑
-                    'direction_consistency': 0.2,  # 适度方向一致性
-                    'sequence_alignment': 8.0,  # 大幅提高，修复REC为0问题
-                    'motion_consistency': 0.3,  # 适度运动连续性
-                    'boundary': 0.2
+                    'reconstruction': 8.0,  # 大幅提高，确保点对点匹配（修复REC为0）
+                    'kl': 0.0003,  # 进一步降低KL，减少随机性
+                    'spatial_coverage': 0.8,  # 降低，避免过度约束
+                    'trajectory_smoothness': 0.15,  # 降低，允许更灵活的路径
+                    'direction_consistency': 0.15,  # 降低，避免过度约束
+                    'sequence_alignment': 5.0,  # 降低，避免训练不稳定
+                    'motion_consistency': 0.2,  # 适度运动连续性
+                    'boundary': 0.15
                 }
             elif epoch <= 25:
                 # 中期：平衡各项损失
                 progress = (epoch - 10) / 15.0
                 weights = {
-                    'reconstruction': 4.0 - 0.5 * progress,  # 逐渐降低到3.5
-                    'kl': 0.0005 + 0.0005 * progress,  # 逐渐增加到0.001
-                    'spatial_coverage': 1.0 + 1.0 * progress,  # 逐渐增加到2.0
-                    'trajectory_smoothness': 0.2 + 0.3 * progress,  # 逐渐增加到0.5
-                    'direction_consistency': 0.2 + 0.3 * progress,  # 逐渐增加到0.5
-                    'sequence_alignment': 8.0 + 2.0 * progress,  # 逐渐增加到10.0
-                    'motion_consistency': 0.3 + 0.5 * progress,  # 逐渐增加到0.8
-                    'boundary': 0.2
+                    'reconstruction': 8.0 - 1.0 * progress,  # 逐渐降低到7.0
+                    'kl': 0.0003 + 0.0004 * progress,  # 逐渐增加到0.0007
+                    'spatial_coverage': 0.8 + 0.7 * progress,  # 逐渐增加到1.5
+                    'trajectory_smoothness': 0.15 + 0.25 * progress,  # 逐渐增加到0.4
+                    'direction_consistency': 0.15 + 0.25 * progress,  # 逐渐增加到0.4
+                    'sequence_alignment': 5.0 + 1.5 * progress,  # 逐渐增加到6.5
+                    'motion_consistency': 0.2 + 0.4 * progress,  # 逐渐增加到0.6
+                    'boundary': 0.15
                 }
             else:
-                # 后期：精细调优，保持高序列对齐权重
+                # 后期：精细调优，保持高重建权重
                 weights = {
-                    'reconstruction': 3.5,  # 最终权重
-                    'kl': 0.001,  # 最终权重（低，减少随机性）
-                    'spatial_coverage': 2.0,  # 最终权重
-                    'trajectory_smoothness': 0.5,  # 最终权重
-                    'direction_consistency': 0.5,  # 最终权重
-                    'sequence_alignment': 10.0,  # 最终权重（高，确保序列对齐）
-                    'motion_consistency': 0.8,  # 最终权重
-                    'boundary': 0.2
+                    'reconstruction': 7.0,  # 最终权重（高，确保点对点匹配）
+                    'kl': 0.0007,  # 最终权重（低，减少随机性）
+                    'spatial_coverage': 1.5,  # 最终权重
+                    'trajectory_smoothness': 0.4,  # 最终权重
+                    'direction_consistency': 0.4,  # 最终权重
+                    'sequence_alignment': 6.5,  # 最终权重（适中，避免不稳定）
+                    'motion_consistency': 0.6,  # 最终权重
+                    'boundary': 0.15
                 }
 
             # 计算总损失（添加motion_consistency项）
@@ -448,11 +468,15 @@ def train():
                     weights['motion_consistency'] * motion_consistency_loss +
                     weights['boundary'] * boundary_penalty
             )
+            
+            # 梯度裁剪，避免训练不稳定
+            # 注意：这里先计算loss，反向传播时再裁剪
 
             # 反向传播
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # 梯度裁剪：降低max_norm，避免训练不稳定
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)  # 从1.0降到0.5
             optimizer.step()
 
             # 计算位置误差
@@ -525,9 +549,23 @@ def train():
                     mus = result[1]
                     logvars = result[2]
 
-                    # ========== 方案A验证损失（与训练一致）==========
-                    # 1. 重构损失
-                    reconstruction_loss = nn.functional.mse_loss(predicted_scanpaths, true_scanpaths)
+                    # ========== 修复版验证损失（与训练一致）==========
+                    # 1. 重构损失（使用加权MSE，与训练一致）
+                    position_weights = torch.ones(config.seq_len, device=predicted_scanpaths.device)
+                    position_weights[0] = 3.0
+                    position_weights[1:5] = 2.0
+                    position_weights[5:10] = 1.5
+                    position_weights = position_weights.unsqueeze(0).unsqueeze(-1)
+                    
+                    squared_errors = (predicted_scanpaths - true_scanpaths) ** 2
+                    weighted_errors = squared_errors * position_weights
+                    reconstruction_loss = weighted_errors.mean()
+                    
+                    point_wise_l1 = torch.abs(predicted_scanpaths - true_scanpaths)
+                    point_wise_l1_weighted = point_wise_l1 * position_weights
+                    point_wise_loss = point_wise_l1_weighted.mean()
+                    
+                    reconstruction_loss = reconstruction_loss + 0.5 * point_wise_loss
 
                     # 2. KL散度正则化
                     kl_loss = -0.5 * torch.sum(1 + logvars - mus.pow(2) - logvars.exp())
@@ -561,37 +599,37 @@ def train():
                     # 使用与训练相同的权重（修复版）
                     if epoch <= 10:
                         weights = {
-                            'reconstruction': 4.0,
-                            'kl': 0.0005,
-                            'spatial_coverage': 1.0,
-                            'trajectory_smoothness': 0.2,
-                            'direction_consistency': 0.2,
-                            'sequence_alignment': 8.0,
-                            'motion_consistency': 0.3,
-                            'boundary': 0.2
+                            'reconstruction': 8.0,
+                            'kl': 0.0003,
+                            'spatial_coverage': 0.8,
+                            'trajectory_smoothness': 0.15,
+                            'direction_consistency': 0.15,
+                            'sequence_alignment': 5.0,
+                            'motion_consistency': 0.2,
+                            'boundary': 0.15
                         }
                     elif epoch <= 25:
                         progress = (epoch - 10) / 15.0
                         weights = {
-                            'reconstruction': 4.0 - 0.5 * progress,
-                            'kl': 0.0005 + 0.0005 * progress,
-                            'spatial_coverage': 1.0 + 1.0 * progress,
-                            'trajectory_smoothness': 0.2 + 0.3 * progress,
-                            'direction_consistency': 0.2 + 0.3 * progress,
-                            'sequence_alignment': 8.0 + 2.0 * progress,
-                            'motion_consistency': 0.3 + 0.5 * progress,
-                            'boundary': 0.2
+                            'reconstruction': 8.0 - 1.0 * progress,
+                            'kl': 0.0003 + 0.0004 * progress,
+                            'spatial_coverage': 0.8 + 0.7 * progress,
+                            'trajectory_smoothness': 0.15 + 0.25 * progress,
+                            'direction_consistency': 0.15 + 0.25 * progress,
+                            'sequence_alignment': 5.0 + 1.5 * progress,
+                            'motion_consistency': 0.2 + 0.4 * progress,
+                            'boundary': 0.15
                         }
                     else:
                         weights = {
-                            'reconstruction': 3.5,
-                            'kl': 0.001,
-                            'spatial_coverage': 2.0,
-                            'trajectory_smoothness': 0.5,
-                            'direction_consistency': 0.5,
-                            'sequence_alignment': 10.0,
-                            'motion_consistency': 0.8,
-                            'boundary': 0.2
+                            'reconstruction': 7.0,
+                            'kl': 0.0007,
+                            'spatial_coverage': 1.5,
+                            'trajectory_smoothness': 0.4,
+                            'direction_consistency': 0.4,
+                            'sequence_alignment': 6.5,
+                            'motion_consistency': 0.6,
+                            'boundary': 0.15
                         }
 
                     # 计算总损失（包含motion_consistency项）
