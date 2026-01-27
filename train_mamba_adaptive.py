@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import json
+import numpy as np
 from datetime import datetime
 from tqdm import tqdm
 from pathlib import Path
@@ -272,18 +273,20 @@ def train():
     model = MambaAdaptiveScanpath(config).to(config.device)
     print(f"模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
 
-    # 优化器（修复：添加betas参数，改善训练稳定性）
+    # 优化器（优化：降低初始学习率，增强正则化）
+    # 修复：降低初始学习率，从0.00012降到0.00005，解决过拟合
+    initial_lr = config.learning_rate * 0.4  # 降低到原来的40%（0.00012 * 0.4 = 0.000048）
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay,
+        lr=initial_lr,  # 使用降低后的学习率
+        weight_decay=config.weight_decay * 1.5,  # 增加weight decay：从2e-3提高到3e-3
         betas=(0.9, 0.999),  # 默认值，但显式指定
         eps=1e-8  # 默认值，但显式指定
     )
 
     # 学习率调度器 - 使用带warmup的余弦退火（改善训练稳定性）
-    # 优化：添加warmup阶段，避免早期训练不稳定
-    warmup_epochs = 5
+    # 优化：延长warmup阶段，降低初始学习率，解决过拟合
+    warmup_epochs = 10  # 延长warmup：从5个epoch延长到10个epoch
     
     # 使用SequentialLR组合warmup和余弦退火
     # Warmup调度器（用于前warmup_epochs个epoch）
@@ -388,25 +391,50 @@ def train():
             true_pixels[:, :, 0] = true_pixels[:, :, 0] * w  # X坐标
             true_pixels[:, :, 1] = true_pixels[:, :, 1] * h  # Y坐标
             
-            # 计算像素距离
+            # 计算像素距离（归一化到图像对角线长度）
             pixel_distances = torch.norm(pred_pixels - true_pixels, p=2, dim=-1)  # (B, T)
+            diagonal_length = np.sqrt(w**2 + h**2)  # 图像对角线长度，用于归一化
+            pixel_distances_norm = pixel_distances / diagonal_length  # 归一化到[0, 1]
             
-            # REC风格的损失：惩罚距离超过阈值的点
-            # 阈值12像素（REC的阈值）
-            rec_threshold = 12.0
-            # 对于距离>12像素的点，使用平方惩罚
-            rec_penalty = torch.mean((pixel_distances - rec_threshold).clamp(min=0.0) ** 2)
+            # REC风格的损失：惩罚距离超过阈值的点（归一化阈值）
+            # 阈值12像素，归一化到对角线长度
+            rec_threshold_norm = 12.0 / diagonal_length
+            rec_threshold_pixels = 12.0  # 像素阈值
             
-            # 像素级MSE损失（所有点）
-            pixel_mse = torch.mean((pred_pixels - true_pixels) ** 2)
+            # 硬约束：对距离>12像素的点对使用更强的惩罚（Focal损失风格）
+            # 距离越远，惩罚越大（指数增长）
+            pixel_distances_abs = pixel_distances  # (B, T) 绝对像素距离
+            far_mask = pixel_distances_abs > rec_threshold_pixels  # (B, T) 距离>12像素的mask
             
-            # 像素级L1损失（更关注精确匹配）
-            pixel_l1 = torch.mean(torch.abs(pred_pixels - true_pixels))
+            # 对于远距离点对，使用指数惩罚：exp((distance - threshold) / threshold)
+            # 这样距离越远，惩罚增长越快
+            far_distances = pixel_distances_abs[far_mask]  # 只对远距离点计算
+            if len(far_distances) > 0:
+                # 归一化到阈值，然后指数增长
+                normalized_far = (far_distances - rec_threshold_pixels) / rec_threshold_pixels
+                rec_penalty_far = torch.mean(torch.exp(normalized_far * 2.0))  # 指数惩罚
+            else:
+                rec_penalty_far = torch.tensor(0.0, device=predicted_scanpaths.device)
             
-            # 组合重建损失：归一化坐标损失 + 像素级损失
-            reconstruction_loss = reconstruction_loss_norm + 0.01 * pixel_mse + 0.01 * pixel_l1 + 0.1 * rec_penalty
+            # 对于所有点，使用平方惩罚（归一化）
+            rec_penalty_all = torch.mean((pixel_distances_norm - rec_threshold_norm).clamp(min=0.0) ** 2)
+            
+            # 组合REC惩罚：所有点的惩罚 + 远距离点的额外惩罚
+            rec_penalty = rec_penalty_all + 3.0 * rec_penalty_far  # 远距离惩罚权重3.0
+            
+            # 像素级MSE损失（归一化到图像尺寸）
+            pixel_diff_norm = (pred_pixels - true_pixels) / diagonal_length  # 归一化差值
+            pixel_mse = torch.mean(pixel_diff_norm ** 2)
+            
+            # 像素级L1损失（归一化）
+            pixel_l1 = torch.mean(torch.abs(pixel_diff_norm))
+            
+            # 组合重建损失：归一化坐标损失 + 归一化像素级损失
+            # 关键修复：大幅提高REC惩罚权重，从2.0提高到8.0，确保点对点匹配
+            reconstruction_loss = reconstruction_loss_norm + 0.5 * pixel_mse + 0.5 * pixel_l1 + 8.0 * rec_penalty
 
-            # 2. KL散度正则化（降低权重，减少随机性）
+            # 2. KL散度正则化（增强正则化，解决过拟合）
+            # 修复：提高KL权重，从0.0003-0.0007提高到0.002-0.01
             kl_loss = -0.5 * torch.sum(1 + logvars - mus.pow(2) - logvars.exp())
             kl_loss = kl_loss / (mus.size(0) * mus.size(1))  # 归一化
 
@@ -435,47 +463,46 @@ def train():
                 above_boundary * (predicted_scanpaths - boundary_max) ** 2
             )
 
-            # ========== 修复版损失权重：平衡训练稳定性和点对点匹配 ==========
-            # 关键修复：
-            # 1. 保持reconstruction权重适中，因为已经添加了像素级损失
-            # 2. 降低sequence_alignment权重，避免训练不稳定
-            # 3. 适度提高motion_consistency权重，改善序列连续性
-            # 4. 降低KL权重，减少随机性
-            # 5. 渐进式权重调整，确保训练稳定
+            # ========== 优化版损失权重：修复REC为0和过拟合问题 ==========
+            # 关键优化：
+            # 1. 大幅提高序列对齐损失权重（从3.0-4.0提高到12.0-20.0），确保点对点匹配
+            # 2. 增强KL正则化（从0.0003-0.0007提高到0.002-0.01），解决过拟合
+            # 3. 保持reconstruction权重适中，因为已经添加了高权重的像素级损失
+            # 4. 渐进式权重调整，确保训练稳定
             if epoch <= 10:
-                # 早期：重点学习点对点匹配
+                # 早期：重点学习点对点匹配，强约束序列对齐
                 weights = {
-                    'reconstruction': 5.0,  # 适中权重（因为已有像素级损失）
-                    'kl': 0.0003,  # 进一步降低KL，减少随机性
+                    'reconstruction': 5.0,  # 适中权重（因为已有高权重像素级损失）
+                    'kl': 0.002,  # 提高KL权重，增强正则化（从0.0003提高到0.002）
                     'spatial_coverage': 0.5,  # 降低，避免过度约束
                     'trajectory_smoothness': 0.1,  # 降低，允许更灵活的路径
                     'direction_consistency': 0.1,  # 降低，避免过度约束
-                    'sequence_alignment': 3.0,  # 降低，避免训练不稳定
+                    'sequence_alignment': 12.0,  # 大幅提高，确保点对点匹配（从3.0提高到12.0）
                     'motion_consistency': 0.15,  # 适度运动连续性
                     'boundary': 0.1
                 }
             elif epoch <= 25:
-                # 中期：平衡各项损失
+                # 中期：平衡各项损失，逐渐增加正则化
                 progress = (epoch - 10) / 15.0
                 weights = {
                     'reconstruction': 5.0 - 0.5 * progress,  # 逐渐降低到4.5
-                    'kl': 0.0003 + 0.0004 * progress,  # 逐渐增加到0.0007
+                    'kl': 0.002 + 0.004 * progress,  # 逐渐增加到0.006（从0.0007提高到0.006）
                     'spatial_coverage': 0.5 + 0.5 * progress,  # 逐渐增加到1.0
                     'trajectory_smoothness': 0.1 + 0.2 * progress,  # 逐渐增加到0.3
                     'direction_consistency': 0.1 + 0.2 * progress,  # 逐渐增加到0.3
-                    'sequence_alignment': 3.0 + 1.0 * progress,  # 逐渐增加到4.0
+                    'sequence_alignment': 12.0 + 4.0 * progress,  # 逐渐增加到16.0（从4.0提高到16.0）
                     'motion_consistency': 0.15 + 0.35 * progress,  # 逐渐增加到0.5
                     'boundary': 0.1
                 }
             else:
-                # 后期：精细调优
+                # 后期：精细调优，保持强约束
                 weights = {
-                    'reconstruction': 4.5,  # 最终权重（适中，因为已有像素级损失）
-                    'kl': 0.0007,  # 最终权重（低，减少随机性）
+                    'reconstruction': 4.5,  # 最终权重（适中，因为已有高权重像素级损失）
+                    'kl': 0.01,  # 最终权重（大幅提高，从0.0007提高到0.01，解决过拟合）
                     'spatial_coverage': 1.0,  # 最终权重
                     'trajectory_smoothness': 0.3,  # 最终权重
                     'direction_consistency': 0.3,  # 最终权重
-                    'sequence_alignment': 4.0,  # 最终权重（适中，避免不稳定）
+                    'sequence_alignment': 20.0,  # 最终权重（大幅提高，从4.0提高到20.0，确保点对点匹配）
                     'motion_consistency': 0.5,  # 最终权重
                     'boundary': 0.1
                 }
@@ -561,8 +588,8 @@ def train():
                     true_scanpaths = batch['scanpath'].to(config.device)
 
                     # 前向传播 - 验证模式
-                    # 修复：验证时使用与训练更接近的Teacher Forcing，减少分布差异
-                    val_teacher_forcing = max(0.4, teacher_forcing_ratio * 0.8)  # 进一步提高验证时TF比例
+                    # 修复：验证时使用与训练相同的Teacher Forcing比例，统一训练和验证策略
+                    val_teacher_forcing = teacher_forcing_ratio  # 使用与训练相同的TF比例
                     result = model(images, gt_scanpaths=true_scanpaths,
                                    teacher_forcing_ratio=val_teacher_forcing,
                                    enable_early_stop=False,
@@ -595,12 +622,32 @@ def train():
                     true_pixels[:, :, 1] = true_pixels[:, :, 1] * h
                     
                     pixel_distances = torch.norm(pred_pixels - true_pixels, p=2, dim=-1)
-                    rec_threshold = 12.0
-                    rec_penalty = torch.mean((pixel_distances - rec_threshold).clamp(min=0.0) ** 2)
-                    pixel_mse = torch.mean((pred_pixels - true_pixels) ** 2)
-                    pixel_l1 = torch.mean(torch.abs(pred_pixels - true_pixels))
+                    diagonal_length = np.sqrt(w**2 + h**2)
+                    pixel_distances_norm = pixel_distances / diagonal_length
                     
-                    reconstruction_loss = reconstruction_loss_norm + 0.01 * pixel_mse + 0.01 * pixel_l1 + 0.1 * rec_penalty
+                    # 验证损失计算（与训练一致）
+                    rec_threshold_norm = 12.0 / diagonal_length
+                    rec_threshold_pixels = 12.0
+                    
+                    # 硬约束：对距离>12像素的点对使用更强的惩罚
+                    pixel_distances_abs = pixel_distances
+                    far_mask = pixel_distances_abs > rec_threshold_pixels
+                    
+                    if len(pixel_distances_abs[far_mask]) > 0:
+                        far_distances = pixel_distances_abs[far_mask]
+                        normalized_far = (far_distances - rec_threshold_pixels) / rec_threshold_pixels
+                        rec_penalty_far = torch.mean(torch.exp(normalized_far * 2.0))
+                    else:
+                        rec_penalty_far = torch.tensor(0.0, device=predicted_scanpaths.device)
+                    
+                    rec_penalty_all = torch.mean((pixel_distances_norm - rec_threshold_norm).clamp(min=0.0) ** 2)
+                    rec_penalty = rec_penalty_all + 3.0 * rec_penalty_far
+                    
+                    pixel_diff_norm = (pred_pixels - true_pixels) / diagonal_length
+                    pixel_mse = torch.mean(pixel_diff_norm ** 2)
+                    pixel_l1 = torch.mean(torch.abs(pixel_diff_norm))
+                    
+                    reconstruction_loss = reconstruction_loss_norm + 0.5 * pixel_mse + 0.5 * pixel_l1 + 8.0 * rec_penalty
 
                     # 2. KL散度正则化
                     kl_loss = -0.5 * torch.sum(1 + logvars - mus.pow(2) - logvars.exp())
@@ -631,15 +678,15 @@ def train():
                         above_boundary * (predicted_scanpaths - boundary_max) ** 2
                     )
 
-                    # 使用与训练相同的权重（修复版）
+                    # 使用与训练相同的权重（优化版）
                     if epoch <= 10:
                         weights = {
                             'reconstruction': 5.0,
-                            'kl': 0.0003,
+                            'kl': 0.002,
                             'spatial_coverage': 0.5,
                             'trajectory_smoothness': 0.1,
                             'direction_consistency': 0.1,
-                            'sequence_alignment': 3.0,
+                            'sequence_alignment': 12.0,
                             'motion_consistency': 0.15,
                             'boundary': 0.1
                         }
@@ -647,22 +694,22 @@ def train():
                         progress = (epoch - 10) / 15.0
                         weights = {
                             'reconstruction': 5.0 - 0.5 * progress,
-                            'kl': 0.0003 + 0.0004 * progress,
+                            'kl': 0.002 + 0.004 * progress,
                             'spatial_coverage': 0.5 + 0.5 * progress,
                             'trajectory_smoothness': 0.1 + 0.2 * progress,
                             'direction_consistency': 0.1 + 0.2 * progress,
-                            'sequence_alignment': 3.0 + 1.0 * progress,
+                            'sequence_alignment': 12.0 + 4.0 * progress,
                             'motion_consistency': 0.15 + 0.35 * progress,
                             'boundary': 0.1
                         }
                     else:
                         weights = {
                             'reconstruction': 4.5,
-                            'kl': 0.0007,
+                            'kl': 0.01,
                             'spatial_coverage': 1.0,
                             'trajectory_smoothness': 0.3,
                             'direction_consistency': 0.3,
-                            'sequence_alignment': 4.0,
+                            'sequence_alignment': 20.0,
                             'motion_consistency': 0.5,
                             'boundary': 0.1
                         }
@@ -790,8 +837,15 @@ def train():
         scheduler.step()
 
     print("\n训练完成！")
-    print(f"最佳验证损失: {best_loss:.4f}")
-    print(f"\n下一步：使用 visualize_mamba_agent.py 可视化结果")
+    print(f"最佳验证损失: {best_val_loss:.4f}")
+    print(f"最佳验证位置误差: {best_val_position_error:.4f}")
+    print(f"\n优化说明：")
+    print(f"  1. 大幅提高序列对齐损失权重（12.0-20.0），修复REC为0问题")
+    print(f"  2. 增强KL正则化（0.002-0.01），解决过拟合问题")
+    print(f"  3. 提高REC惩罚权重（8.0），确保点对点匹配")
+    print(f"  4. 降低初始学习率（0.000048），延长warmup（10 epochs）")
+    print(f"  5. 统一训练和验证的Teacher Forcing策略")
+    print(f"\n下一步：使用 evaluate_fixed.py 评估模型，检查REC指标是否改善")
 
 
 if __name__ == '__main__':

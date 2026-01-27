@@ -13,220 +13,208 @@
       "epoch": 1,
       "learning_rate": 2.4e-05,
       "train": {
-        "loss": 5.4175049912439635,
-        "position_error": 0.29183245370649313
+        "loss": 3.97933787254438,
+        "position_error": 0.30346786073625903
       }
     },
     {
       "epoch": 2,
       "learning_rate": 4.8e-05,
       "train": {
-        "loss": 4.960298653171487,
-        "position_error": 0.2783016765362596
+        "loss": 3.5571864990338886,
+        "position_error": 0.28205683415066707
       }
     },
     {
       "epoch": 3,
       "learning_rate": 7.2e-05,
       "train": {
-        "loss": 4.876621663080503,
-        "position_error": 0.27593631360628834
+        "loss": 3.475407718632319,
+        "position_error": 0.2774737569159024
       }
     },
     {
       "epoch": 4,
       "learning_rate": 9.6e-05,
       "train": {
-        "loss": 4.767076690229651,
-        "position_error": 0.27117909058316114
+        "loss": 3.4365559937202765,
+        "position_error": 0.2768135553761704
       }
     },
     {
       "epoch": 5,
       "learning_rate": 0.00012,
       "train": {
-        "loss": 4.723213163140702,
-        "position_error": 0.269666706862515
+        "loss": 3.3764798778377165,
+        "position_error": 0.27296343854028887
       },
       "val": {
-        "loss": 4.735935418229354,
-        "position_error": 0.29184415377676487
+        "loss": 3.378930167147988,
+        "position_error": 0.28936415077432204
       }
     },
     {
       "epoch": 6,
       "learning_rate": 0.00012,
       "train": {
-        "loss": 4.6746456903954074,
-        "position_error": 0.2678227947999353
+        "loss": 3.3614788649833365,
+        "position_error": 0.2717339846369338
       }
     },
     {
       "epoch": 7,
       "learning_rate": 0.00011986115086480998,
       "train": {
-        "loss": 4.5993539842840745,
-        "position_error": 0.2636320897569395
+        "loss": 3.3281815078160535,
+        "position_error": 0.2691217457186686
       }
     },
     {
       "epoch": 8,
       "learning_rate": 0.0001194452799182695,
       "train": {
-        "loss": 4.589083678755042,
-        "position_error": 0.26352389830432527
+        "loss": 3.296144964270396,
+        "position_error": 0.2666706843735421
       }
     },
     {
       "epoch": 9,
       "learning_rate": 0.00011875441324182693,
       "train": {
-        "loss": 4.566218354604016,
-        "position_error": 0.26338743159215744
+        "loss": 3.2848493713222138,
+        "position_error": 0.26540445256723116
       }
     },
     {
       "epoch": 10,
       "learning_rate": 0.00011779191666848419,
       "train": {
-        "loss": 4.517164215323043,
-        "position_error": 0.26124739414208553
+        "loss": 3.2785916798735317,
+        "position_error": 0.26456787659697334
       },
       "val": {
-        "loss": 4.654197255247517,
-        "position_error": 0.2864934004058963
+        "loss": 3.394702545906368,
+        "position_error": 0.2912093743093704
       }
     },
     {
       "epoch": 11,
       "learning_rate": 0.00011656247938479679,
       "train": {
-        "loss": 4.618698551230235,
-        "position_error": 0.2616659559615671
+        "loss": 3.357051686718039,
+        "position_error": 0.2642518885331611
       }
     },
     {
       "epoch": 12,
       "learning_rate": 0.00011507209108562826,
       "train": {
-        "loss": 4.723862751216105,
-        "position_error": 0.2615003845054809
+        "loss": 3.4297934911022447,
+        "position_error": 0.26357524305173796
       }
     },
     {
       "epoch": 13,
       "learning_rate": 0.00011332801279295885,
       "train": {
-        "loss": 4.806801132306661,
-        "position_error": 0.26011710583347164
+        "loss": 3.5216237930402365,
+        "position_error": 0.2648126122477936
       }
     },
     {
       "epoch": 14,
       "learning_rate": 0.00011133874148091628,
       "train": {
-        "loss": 4.8827015419528905,
-        "position_error": 0.2585990415452278
+        "loss": 3.5667875930054547,
+        "position_error": 0.26224817752021634
       }
     },
     {
       "epoch": 15,
       "learning_rate": 0.00010911396867937201,
       "train": {
-        "loss": 5.000439350572351,
-        "position_error": 0.25935496647064
+        "loss": 3.6427575228965448,
+        "position_error": 0.2620542665866956
       },
       "val": {
-        "loss": 5.156415547195234,
-        "position_error": 0.2897626341957795
+        "loss": 3.7615768501633093,
+        "position_error": 0.2910596669504517
       }
     },
     {
       "epoch": 16,
       "learning_rate": 0.00010666453325778174,
       "train": {
-        "loss": 5.117406122651818,
-        "position_error": 0.26025084187723185
+        "loss": 3.718465426196791,
+        "position_error": 0.26164840149552854
       }
     },
     {
       "epoch": 17,
       "learning_rate": 0.00010400236861930312,
       "train": {
-        "loss": 5.222487589431136,
-        "position_error": 0.26027447156710165
+        "loss": 3.798069560691102,
+        "position_error": 0.2619119334710787
       }
     },
     {
       "epoch": 18,
       "learning_rate": 0.00010114044456245492,
       "train": {
-        "loss": 5.324677625420976,
-        "position_error": 0.26053620960614454
+        "loss": 3.8672742961204216,
+        "position_error": 0.261429194269115
       }
     },
     {
       "epoch": 19,
       "learning_rate": 9.809270409356252e-05,
       "train": {
-        "loss": 5.409662245397699,
-        "position_error": 0.25937862457477884
+        "loss": 3.949413127115328,
+        "position_error": 0.26152654857668156
       }
     },
     {
       "epoch": 20,
       "learning_rate": 9.487399549783256e-05,
       "train": {
-        "loss": 5.5067312410433,
-        "position_error": 0.25921038287143183
+        "loss": 4.0244883870425285,
+        "position_error": 0.2615207380219682
       },
       "val": {
-        "loss": 5.711461741673319,
-        "position_error": 0.29059966281056404
+        "loss": 4.178407014984834,
+        "position_error": 0.2913015615195036
       }
     },
     {
       "epoch": 21,
       "learning_rate": 9.15e-05,
       "train": {
-        "loss": 5.594045304598874,
-        "position_error": 0.25843523214124653
+        "loss": 4.115168816422763,
+        "position_error": 0.26255442189843686
       }
     },
     {
       "epoch": 22,
       "learning_rate": 8.798715536697742e-05,
       "train": {
-        "loss": 5.712417059075342,
-        "position_error": 0.25957252869050795
+        "loss": 4.1721273174024605,
+        "position_error": 0.2614194423368532
       }
     },
     {
       "epoch": 23,
       "learning_rate": 8.435257582470699e-05,
       "train": {
-        "loss": 5.815562293954091,
-        "position_error": 0.2594689293675227
+        "loss": 4.262403735722581,
+        "position_error": 0.26213772933777063
       }
     },
     {
       "epoch": 24,
       "learning_rate": 8.061396867937201e-05,
       "train": {
-        "loss": 5.894524874752515,
-        "position_error": 0.25823318758239483
-      }
-    },
-    {
-      "epoch": 25,
-      "learning_rate": 7.678954804918107e-05,
-      "train": {
-        "loss": 6.020322189592335,
-        "position_error": 0.2593092897166945
-      },
-      "val": {
-        "loss": 6.323639446183255,
-        "position_error": 0.2965537209651972
+        "loss": 4.347554941699929,
+        "position_error": 0.2624805500654325
       }
     }
   ]

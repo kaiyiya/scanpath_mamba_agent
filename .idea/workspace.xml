@@ -5,8 +5,10 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="5723d4d7-6133-4bfc-afd3-dda1d84d9950" name="Changes" comment="feat(模型改进) go on">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/logs/evaluation_results_all.json" beforeDir="false" afterPath="$PROJECT_DIR$/logs/evaluation_results_all.json" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/logs/training_log.json" beforeDir="false" afterPath="$PROJECT_DIR$/logs/training_log.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/train_mamba_adaptive.py" beforeDir="false" afterPath="$PROJECT_DIR$/train_mamba_adaptive.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -86,7 +88,7 @@
       <workItem from="1768881420119" duration="5005000" />
       <workItem from="1768889537986" duration="48049000" />
       <workItem from="1769146911635" duration="6988000" />
-      <workItem from="1769386914036" duration="15337000" />
+      <workItem from="1769386914036" duration="16101000" />
     </task>
     <task id="LOCAL-00001" summary="feat(models): 添加优化版扫描路径生成模型V5&#10;&#10;- 引入更大的特征图尺寸（14x14）以保留更多空间信息&#10;- 简化注意力机制，只在关键层使用轻量注意力模块&#10;- 实现Scheduled Sampling策略替代简单Teacher Forcing&#10;- 采用自适应损失函数动态调整位置与方向权重并加入多重方向约束&#10;- 优化局部-全局特征融合与简化特征更新机制&#10;- 增加了正则化方法（Label Smoothing和DropPath）&#10;- 配置文件新增Mamba-Adaptive模型设置，支持自动停止和数据增强&#10;- 新增数据加载模块，支持训练与测试数据的数据增强与预处理&#10;- 指标模块引入余弦等多种扫描路径评估方法&#10;- 模型导入接口统一管理，方便调用与扩展">
       <option name="closed" value="true" />
@@ -400,7 +402,15 @@
       <option name="project" value="LOCAL" />
       <updated>1769484436109</updated>
     </task>
-    <option name="localTasksCounter" value="40" />
+    <task id="LOCAL-00040" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1769489101535</created>
+      <option name="number" value="00040" />
+      <option name="presentableId" value="LOCAL-00040" />
+      <option name="project" value="LOCAL" />
+      <updated>1769489101535</updated>
+    </task>
+    <option name="localTasksCounter" value="41" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
