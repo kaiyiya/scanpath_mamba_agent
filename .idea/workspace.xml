@@ -4,7 +4,13 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="5723d4d7-6133-4bfc-afd3-dda1d84d9950" name="Changes" comment="feat(模型改进) go on" />
+    <list default="true" id="5723d4d7-6133-4bfc-afd3-dda1d84d9950" name="Changes" comment="feat(模型改进) go on">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/logs/evaluation_results_all.json" beforeDir="false" afterPath="$PROJECT_DIR$/logs/evaluation_results_all.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/logs/training_log.json" beforeDir="false" afterPath="$PROJECT_DIR$/logs/training_log.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/models/mamba_adaptive_scanpath.py" beforeDir="false" afterPath="$PROJECT_DIR$/models/mamba_adaptive_scanpath.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/train_mamba_adaptive.py" beforeDir="false" afterPath="$PROJECT_DIR$/train_mamba_adaptive.py" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -12,6 +18,20 @@
   </component>
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
+  "lastFilter": {
+    "state": "OPEN",
+    "assignee": "kaiyiya"
+  }
+}]]></component>
+  <component name="GithubPullRequestsUISettings">
+    <option name="selectedUrlAndAccountId">
+      <UrlAndAccount>
+        <option name="accountId" value="db80e5e4-845f-48cf-93da-eb40a9909c05" />
+        <option name="url" value="https://github.com/kaiyiya/scanpath_mamba_agent.git" />
+      </UrlAndAccount>
+    </option>
   </component>
   <component name="MarkdownSettingsMigration">
     <option name="stateVersion" value="1" />
@@ -27,24 +47,25 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;ASKED_ADD_EXTERNAL_FILES&quot;: &quot;true&quot;,
-    &quot;ASKED_SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.OpenProjectViewOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
-    &quot;SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
-    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
-    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
-    &quot;last_opened_file_path&quot;: &quot;E:/vscode/eye_scan/scanpath_mamba_agent/scanpath_mamba_agent&quot;,
-    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
-    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
-    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
-    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
-    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
-    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ASKED_ADD_EXTERNAL_FILES": "true",
+    "ASKED_SHARE_PROJECT_CONFIGURATION_FILES": "true",
+    "RunOnceActivity.OpenProjectViewOnStart": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "SHARE_PROJECT_CONFIGURATION_FILES": "true",
+    "git-widget-placeholder": "main",
+    "ignore.virus.scanning.warn.message": "true",
+    "last_opened_file_path": "E:/vscode/eye_scan/scanpath_mamba_agent/scanpath_mamba_agent",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "npm",
+    "settings.editor.selected.configurable": "http.proxy",
+    "vue.rearranger.settings.migration": "true"
   }
-}</component>
+}]]></component>
   <component name="RecentsManager">
     <key name="MoveFile.RECENT_KEYS">
       <recent name="E:\vscode\eye_scan\scanpath_mamba_agent\scanpath_mamba_agent\visualization_results_adaptive" />
@@ -68,7 +89,7 @@
       <workItem from="1768881420119" duration="5005000" />
       <workItem from="1768889537986" duration="48049000" />
       <workItem from="1769146911635" duration="6988000" />
-      <workItem from="1769386914036" duration="9888000" />
+      <workItem from="1769386914036" duration="13134000" />
     </task>
     <task id="LOCAL-00001" summary="feat(models): 添加优化版扫描路径生成模型V5&#10;&#10;- 引入更大的特征图尺寸（14x14）以保留更多空间信息&#10;- 简化注意力机制，只在关键层使用轻量注意力模块&#10;- 实现Scheduled Sampling策略替代简单Teacher Forcing&#10;- 采用自适应损失函数动态调整位置与方向权重并加入多重方向约束&#10;- 优化局部-全局特征融合与简化特征更新机制&#10;- 增加了正则化方法（Label Smoothing和DropPath）&#10;- 配置文件新增Mamba-Adaptive模型设置，支持自动停止和数据增强&#10;- 新增数据加载模块，支持训练与测试数据的数据增强与预处理&#10;- 指标模块引入余弦等多种扫描路径评估方法&#10;- 模型导入接口统一管理，方便调用与扩展">
       <option name="closed" value="true" />
@@ -358,7 +379,15 @@
       <option name="project" value="LOCAL" />
       <updated>1769471689560</updated>
     </task>
-    <option name="localTasksCounter" value="37" />
+    <task id="LOCAL-00037" summary="feat(模型改进) go on">
+      <option name="closed" value="true" />
+      <created>1769473054717</created>
+      <option name="number" value="00037" />
+      <option name="presentableId" value="LOCAL-00037" />
+      <option name="project" value="LOCAL" />
+      <updated>1769473054717</updated>
+    </task>
+    <option name="localTasksCounter" value="38" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">

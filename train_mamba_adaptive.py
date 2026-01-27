@@ -19,36 +19,36 @@ import math
 
 def compute_teacher_forcing_ratio(epoch, step_idx=None):
     """
-    优化的Teacher Forcing策略（改善训练稳定性）
+    修复版Teacher Forcing策略（改善序列对齐，修复REC为0问题）
     
-    改进点：
-    1. 更慢的衰减速度，避免训练不稳定
-    2. 保持较高的最终比例，减少训练和推理差异
-    3. 更平滑的步级衰减
+    关键修复：
+    1. 保持较高的Teacher Forcing比例，确保模型学习真实序列
+    2. 更慢的衰减速度，避免训练不稳定
+    3. 前几步保持高TF，确保序列起始正确
 
     Args:
         epoch: 当前训练轮次
         step_idx: 当前序列中的步骤索引（0-29），用于前几步保持高TF
     """
-    initial_ratio = 0.9  # 提高初始比例，确保早期训练稳定
-    final_ratio = 0.4  # 提高最终比例（从0.2到0.4），减少训练和推理差异
+    initial_ratio = 0.95  # 提高初始比例，确保早期训练稳定
+    final_ratio = 0.5  # 提高最终比例，减少训练和推理差异
     decay_epochs = 50  # 50 epoch
 
     # 线性衰减（更稳定）：ratio = initial - (initial - final) * (epoch / decay_epochs)
     base_ratio = initial_ratio - (initial_ratio - final_ratio) * min(epoch / decay_epochs, 1.0)
     base_ratio = max(base_ratio, final_ratio)
 
-    # 前几步平滑衰减（更保守的策略）
+    # 前几步平滑衰减（更保守的策略，确保序列对齐）
     if step_idx is not None:
         if step_idx < 3:
-            # 前3步：额外+0.1，确保起始稳定
-            return min(base_ratio + 0.1, 0.95)
+            # 前3步：额外+0.05，确保起始稳定
+            return min(base_ratio + 0.05, 1.0)
         elif step_idx < 6:
-            # 3-6步：额外+0.05
-            return min(base_ratio + 0.05, 0.90)
+            # 3-6步：额外+0.03
+            return min(base_ratio + 0.03, 0.98)
         elif step_idx < 10:
-            # 6-10步：额外+0.02
-            return min(base_ratio + 0.02, 0.85)
+            # 6-10步：额外+0.01
+            return min(base_ratio + 0.01, 0.95)
 
     return base_ratio
 
@@ -305,11 +305,12 @@ def train():
     )
 
     # 早停机制：基于验证位置误差而不是损失
-    # 优化：增加patience，避免过早停止
+    # 修复：正确计算patience，考虑验证间隔
     best_val_position_error = float('inf')
     patience_counter = 0
-    early_stopping_patience = 15  # 增加到15，给模型更多训练机会
+    early_stopping_patience = 20  # 增加到20，给模型更多训练机会（考虑验证间隔）
     best_val_loss = float('inf')  # 仍然记录，但用于保存模型
+    last_val_epoch = 0  # 记录上次验证的epoch
 
     # 训练日志
     training_log = {
@@ -391,49 +392,49 @@ def train():
                 above_boundary * (predicted_scanpaths - boundary_max) ** 2
             )
 
-            # ========== 优化版损失权重：平衡各项损失，改善训练稳定性 ==========
-            # 改进策略：
-            # 1. 降低sequence_alignment权重，避免过度约束导致路径"卡住"
-            # 2. 提高motion_consistency权重，改善序列连续性
-            # 3. 平衡reconstruction和sequence_alignment，避免冲突
-            # 4. 适度提高KL权重，增加模型多样性
-            # 5. 渐进式权重调整，避免训练不稳定
-            if epoch <= 15:
-                # 早期：重点学习基本位置预测
+            # ========== 修复版损失权重：恢复序列对齐能力，修复REC为0的严重问题 ==========
+            # 关键修复：
+            # 1. 大幅提高sequence_alignment权重，恢复序列对齐能力（REC为0是严重问题）
+            # 2. 保持reconstruction权重，确保基础位置预测
+            # 3. 适度提高motion_consistency，改善序列连续性
+            # 4. 降低KL权重，减少随机性，改善序列对齐
+            # 5. 渐进式权重调整，确保训练稳定
+            if epoch <= 10:
+                # 早期：重点学习序列对齐和基础位置预测
                 weights = {
-                    'reconstruction': 5.0,  # 提高基础重建损失
-                    'kl': 0.001,  # 适度增加KL，保持多样性
-                    'spatial_coverage': 1.5,  # 降低，避免过度约束
-                    'trajectory_smoothness': 0.3,  # 提高，改善平滑性
-                    'direction_consistency': 0.3,  # 提高，改善方向一致性
-                    'sequence_alignment': 3.0,  # 降低，避免过度约束
-                    'motion_consistency': 0.5,  # 大幅提高，改善运动连续性
-                    'boundary': 0.3
+                    'reconstruction': 4.0,  # 基础重建损失
+                    'kl': 0.0005,  # 降低KL，减少随机性，改善对齐
+                    'spatial_coverage': 1.0,  # 降低，避免过度约束
+                    'trajectory_smoothness': 0.2,  # 适度平滑
+                    'direction_consistency': 0.2,  # 适度方向一致性
+                    'sequence_alignment': 8.0,  # 大幅提高，修复REC为0问题
+                    'motion_consistency': 0.3,  # 适度运动连续性
+                    'boundary': 0.2
                 }
-            elif epoch <= 30:
+            elif epoch <= 25:
                 # 中期：平衡各项损失
-                progress = (epoch - 15) / 15.0
+                progress = (epoch - 10) / 15.0
                 weights = {
-                    'reconstruction': 5.0 - 1.0 * progress,  # 逐渐降低到4.0
-                    'kl': 0.001 + 0.001 * progress,  # 逐渐增加到0.002
-                    'spatial_coverage': 1.5 + 0.5 * progress,  # 逐渐增加到2.0
-                    'trajectory_smoothness': 0.3 + 0.2 * progress,  # 逐渐增加到0.5
-                    'direction_consistency': 0.3 + 0.2 * progress,  # 逐渐增加到0.5
-                    'sequence_alignment': 3.0 + 1.0 * progress,  # 逐渐增加到4.0
-                    'motion_consistency': 0.5 + 0.3 * progress,  # 逐渐增加到0.8
-                    'boundary': 0.3
+                    'reconstruction': 4.0 - 0.5 * progress,  # 逐渐降低到3.5
+                    'kl': 0.0005 + 0.0005 * progress,  # 逐渐增加到0.001
+                    'spatial_coverage': 1.0 + 1.0 * progress,  # 逐渐增加到2.0
+                    'trajectory_smoothness': 0.2 + 0.3 * progress,  # 逐渐增加到0.5
+                    'direction_consistency': 0.2 + 0.3 * progress,  # 逐渐增加到0.5
+                    'sequence_alignment': 8.0 + 2.0 * progress,  # 逐渐增加到10.0
+                    'motion_consistency': 0.3 + 0.5 * progress,  # 逐渐增加到0.8
+                    'boundary': 0.2
                 }
             else:
-                # 后期：精细调优
+                # 后期：精细调优，保持高序列对齐权重
                 weights = {
-                    'reconstruction': 4.0,  # 最终权重
-                    'kl': 0.002,  # 最终权重（适度增加多样性）
+                    'reconstruction': 3.5,  # 最终权重
+                    'kl': 0.001,  # 最终权重（低，减少随机性）
                     'spatial_coverage': 2.0,  # 最终权重
                     'trajectory_smoothness': 0.5,  # 最终权重
                     'direction_consistency': 0.5,  # 最终权重
-                    'sequence_alignment': 4.0,  # 最终权重（降低，避免过度约束）
-                    'motion_consistency': 0.8,  # 最终权重（提高，改善连续性）
-                    'boundary': 0.3
+                    'sequence_alignment': 10.0,  # 最终权重（高，确保序列对齐）
+                    'motion_consistency': 0.8,  # 最终权重
+                    'boundary': 0.2
                 }
 
             # 计算总损失（添加motion_consistency项）
@@ -513,8 +514,8 @@ def train():
                     true_scanpaths = batch['scanpath'].to(config.device)
 
                     # 前向传播 - 验证模式
-                    # 优化：验证时使用与训练更接近的Teacher Forcing，减少分布差异
-                    val_teacher_forcing = max(0.3, teacher_forcing_ratio * 0.7)  # 提高验证时TF比例
+                    # 修复：验证时使用与训练更接近的Teacher Forcing，减少分布差异
+                    val_teacher_forcing = max(0.4, teacher_forcing_ratio * 0.8)  # 进一步提高验证时TF比例
                     result = model(images, gt_scanpaths=true_scanpaths,
                                    teacher_forcing_ratio=val_teacher_forcing,
                                    enable_early_stop=False,
@@ -557,40 +558,40 @@ def train():
                         above_boundary * (predicted_scanpaths - boundary_max) ** 2
                     )
 
-                    # 使用与训练相同的权重（优化版）
-                    if epoch <= 15:
+                    # 使用与训练相同的权重（修复版）
+                    if epoch <= 10:
                         weights = {
-                            'reconstruction': 5.0,
-                            'kl': 0.001,
-                            'spatial_coverage': 1.5,
-                            'trajectory_smoothness': 0.3,
-                            'direction_consistency': 0.3,
-                            'sequence_alignment': 3.0,
-                            'motion_consistency': 0.5,
-                            'boundary': 0.3
+                            'reconstruction': 4.0,
+                            'kl': 0.0005,
+                            'spatial_coverage': 1.0,
+                            'trajectory_smoothness': 0.2,
+                            'direction_consistency': 0.2,
+                            'sequence_alignment': 8.0,
+                            'motion_consistency': 0.3,
+                            'boundary': 0.2
                         }
-                    elif epoch <= 30:
-                        progress = (epoch - 15) / 15.0
+                    elif epoch <= 25:
+                        progress = (epoch - 10) / 15.0
                         weights = {
-                            'reconstruction': 5.0 - 1.0 * progress,
-                            'kl': 0.001 + 0.001 * progress,
-                            'spatial_coverage': 1.5 + 0.5 * progress,
-                            'trajectory_smoothness': 0.3 + 0.2 * progress,
-                            'direction_consistency': 0.3 + 0.2 * progress,
-                            'sequence_alignment': 3.0 + 1.0 * progress,
-                            'motion_consistency': 0.5 + 0.3 * progress,
-                            'boundary': 0.3
+                            'reconstruction': 4.0 - 0.5 * progress,
+                            'kl': 0.0005 + 0.0005 * progress,
+                            'spatial_coverage': 1.0 + 1.0 * progress,
+                            'trajectory_smoothness': 0.2 + 0.3 * progress,
+                            'direction_consistency': 0.2 + 0.3 * progress,
+                            'sequence_alignment': 8.0 + 2.0 * progress,
+                            'motion_consistency': 0.3 + 0.5 * progress,
+                            'boundary': 0.2
                         }
                     else:
                         weights = {
-                            'reconstruction': 4.0,
-                            'kl': 0.002,
+                            'reconstruction': 3.5,
+                            'kl': 0.001,
                             'spatial_coverage': 2.0,
                             'trajectory_smoothness': 0.5,
                             'direction_consistency': 0.5,
-                            'sequence_alignment': 4.0,
+                            'sequence_alignment': 10.0,
                             'motion_consistency': 0.8,
-                            'boundary': 0.3
+                            'boundary': 0.2
                         }
 
                     # 计算总损失（包含motion_consistency项）
@@ -628,10 +629,14 @@ def train():
             print(f"  Learning Rate: {current_lr:.6f}")
 
             # 保存最佳模型：优先基于位置误差，也考虑损失
+            # 修复：正确计算patience，考虑验证间隔
             save_model = False
+            improved = False
+            
             if val_position_error < best_val_position_error:
                 best_val_position_error = val_position_error
                 save_model = True
+                improved = True
                 patience_counter = 0  # 重置早停计数器（基于位置误差）
                 print(f"  ✅ 验证位置误差改善: {val_position_error:.4f} (新最佳)")
 
@@ -652,14 +657,20 @@ def train():
                 print(f"  💾 保存最佳模型: {best_path}")
                 print(f"     最佳验证位置误差: {best_val_position_error:.4f}")
                 print(f"     最佳验证损失: {best_val_loss:.4f}")
-            else:
-                patience_counter += 1
-                print(f"  ⚠️ 验证位置误差未改善 ({patience_counter}/{early_stopping_patience})")
+            
+            # 修复：只有在验证时且未改善时才增加patience
+            if not improved:
+                # 计算从上次验证到现在的epoch数
+                epochs_since_last_val = epoch - last_val_epoch
+                patience_counter += epochs_since_last_val
+                print(f"  ⚠️ 验证位置误差未改善 (patience: {patience_counter}/{early_stopping_patience})")
                 print(f"     当前: {val_position_error:.4f}, 最佳: {best_val_position_error:.4f}")
+            
+            last_val_epoch = epoch
 
             # 早停检查：基于位置误差
             if patience_counter >= early_stopping_patience:
-                print(f"\n⏹️ 早停触发！验证位置误差已经{early_stopping_patience}个epoch没有改善")
+                print(f"\n⏹️ 早停触发！验证位置误差已经{patience_counter}个epoch没有改善")
                 print(f"最佳验证位置误差: {best_val_position_error:.4f}")
                 print(f"最佳验证损失: {best_val_loss:.4f}")
                 break

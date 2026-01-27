@@ -524,18 +524,18 @@ class MambaAdaptiveScanpathGenerator(nn.Module):
             mu = self.latent_mu(features_with_pos)  # (B, d_model//2)
             logvar = self.latent_logvar(features_with_pos)  # (B, d_model//2)
 
-            # 优化：动态调整logvar，确保有足够的多样性但不过度
-            # 改进：使用更合理的logvar范围，平衡确定性和多样性
-            logvar = torch.clamp(logvar, min=-1.5, max=1.5)  # 限制logvar范围，确保std在[0.22, 2.12]
+            # 修复：进一步降低logvar，减少随机性，改善序列对齐
+            # 关键修复：降低logvar上限，减少采样方差，让预测更确定
+            logvar = torch.clamp(logvar, min=-2.0, max=0.5)  # 限制logvar范围，确保std在[0.37, 1.28]，减少随机性
 
-            # 优化：统一训练和推理的采样策略，减少分布差异
-            # 改进：推理时也使用采样，但使用较低的temperature，保持训练和推理一致性
+            # 修复：降低VAE随机性，改善序列对齐（REC为0的严重问题）
+            # 关键修复：降低temperature，减少随机性，让模型更确定地预测位置
             if self.training:
-                # 训练时：使用适中的temperature，保持多样性
-                z = self.reparameterize(mu, logvar, temperature=0.8)  # 提高temperature，增加多样性
+                # 训练时：使用较低的temperature，减少随机性，改善序列对齐
+                z = self.reparameterize(mu, logvar, temperature=0.3)  # 降低temperature，减少随机性
             else:
-                # 推理时：使用较低的temperature，减少随机性但保持一致性
-                z = self.reparameterize(mu, logvar, temperature=0.5)  # 使用采样而不是完全确定性
+                # 推理时：使用更低的temperature，保持确定性
+                z = self.reparameterize(mu, logvar, temperature=0.2)  # 进一步降低，保持确定性
 
             # ==================== 方案B：预测相对位移而不是绝对位置 ====================
             # 回退到绝对位置预测（相对位移预测导致LEV恶化）
